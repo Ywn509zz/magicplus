@@ -390,6 +390,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `SLINT_BACKEND=winit-software` | Windows/Linux : force le rendu logiciel de Slint. |
 | `MAGICPLUS_FAKE_VERSION=0.4.0` | Fait croire à l'app qu'elle a cette version (essayer la recherche et l'installation d'une mise à jour). |
 | `MAGICPLUS_UPDATE_REPO=compte/dépôt` | Autre dépôt GitHub où chercher les versions. |
+| `MAGICPLUS_UPDATE_TEST=1` | Sans interface : cherche, télécharge, vérifie et installe la dernière version publiée, puis quitte (avec `MAGICPLUS_FAKE_VERSION=0.0.1`). |
 
 Deux instances sur une même machine ne peuvent pas partager les ports 45454/45455 : pour tester à
 deux, utiliser deux machines, ou les tests `cargo test` qui utilisent des ports dédiés.
