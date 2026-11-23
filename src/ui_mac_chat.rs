@@ -164,6 +164,25 @@ impl ChatUi {
     pub(super) fn current_id(&self) -> Option<String> {
         self.current.clone()
     }
+
+    pub(super) fn current_view(&self) -> Option<ConversationView> {
+        self.current_conversation.clone()
+    }
+
+    /// Groupe quitté : lecture seule.
+    pub(super) fn current_closed(&self) -> bool {
+        self.current_conversation.as_ref().is_some_and(|c| c.closed)
+    }
+
+    /// Vue de la ligne d'un message (pour y accrocher une bulle).
+    pub(super) fn row_view(&self, index: isize) -> Option<Retained<NSView>> {
+        self.rows.get(index.max(0) as usize).map(|row| row.2.clone())
+    }
+
+    /// Numéro de la ligne qui est (ou contient) cette vue.
+    pub(super) fn row_index(&self, view: &NSView) -> Option<isize> {
+        self.rows.iter().position(|row| std::ptr::eq(&*row.2, view)).map(|i| i as isize)
+    }
 }
 
 // ------------------------------------------------------------------ construction de la page
@@ -273,6 +292,8 @@ pub(super) fn build(controller: &Controller, mtm: MainThreadMarker) -> (Retained
     header_texts.addArrangedSubview(&conversation_title);
     header_texts.addArrangedSubview(&subtitle);
     header.addArrangedSubview(&header_texts);
+    let pins_button = icon_button("pin", "Messages épinglés", sel!(chatPins:), controller, mtm);
+    header.addView_inGravity(&pins_button, NSStackViewGravity::Trailing);
     let canvas_button = icon_button("doc.richtext", "Canevas partagés : pages écrites ensemble", sel!(chatToggleCanvas:), controller, mtm);
     header.addView_inGravity(&canvas_button, NSStackViewGravity::Trailing);
     let group_button = icon_button("ellipsis.circle", "Options du groupe", sel!(chatGroupMenu:), controller, mtm);
@@ -420,6 +441,7 @@ impl Controller {
     /// Appelé toutes les 150 ms : ne redessine que si les discussions ont changé.
     pub(super) fn chat_tick(&self) {
         self.canvas_tick();
+        self.debug_start_menu();
         let revision = self.engine().chat_revision();
         let (seen, progress, last) = {
             let ui = self.ivars().chat.borrow();
@@ -627,10 +649,10 @@ impl Controller {
                     .collect();
                 let reactions: String = m.reactions.iter().map(|r| format!("{}{}{}", r.emoji, r.count, r.mine)).collect();
                 format!(
-                    "{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
+                    "{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}",
                     m.text, m.edited, m.deleted, reactions, m.status, attachments, headers[i], Some(i) == last_mine,
                     m.reply.as_ref().map(|r| r.excerpt.as_str()).unwrap_or(""),
-                    profiles_revision
+                    profiles_revision, m.pinned_by, m.forwarded
                 )
             })
             .collect();
@@ -751,6 +773,11 @@ impl Controller {
             column.addArrangedSubview(&line);
         }
 
+        if let Some(origin) = &message.forwarded {
+            let note = secondary(&format!("↪︎ Transféré · message de {origin}"), mtm);
+            note.setFont(Some(&NSFontManager::sharedFontManager(mtm).convertFont_toHaveTrait(&NSFont::systemFontOfSize(11.5), NSFontTraitMask::ItalicFontMask)));
+            column.addArrangedSubview(&note);
+        }
         let (body, content) = bubble(if message.mine { 1 } else { 0 }, 7.0, 11.0, mtm);
         let mut has_content = false;
         if message.deleted {
@@ -798,6 +825,11 @@ impl Controller {
             column.addArrangedSubview(&reactions);
         }
 
+        if let Some(by) = &message.pinned_by {
+            let pinned = secondary(&format!("📌 Épinglé par {by}"), mtm);
+            pinned.setFont(Some(&NSFont::systemFontOfSize(10.5)));
+            column.addArrangedSubview(&pinned);
+        }
         if message.mine && (last_mine || message.status == MessageStatus::Sending) {
             let status = match &message.status {
                 MessageStatus::Sending => "Envoi… (partira dès que le destinataire est joignable)".to_string(),
@@ -817,8 +849,12 @@ impl Controller {
         let actions = icon_button("ellipsis", "Répondre, réagir, modifier…", sel!(chatMessageMenu:), self, mtm);
         actions.setTag(index as isize);
         row.addView_inGravity(&actions, NSStackViewGravity::Trailing);
-        // Clic droit sur le message : même menu.
-        unsafe { row.setMenu(Some(&self.message_menu(index, message, mtm))) };
+        // Clic droit sur le message : même menu stylisé.
+        let right_click = unsafe {
+            NSClickGestureRecognizer::initWithTarget_action(NSClickGestureRecognizer::alloc(mtm), Some(as_target(self)), Some(sel!(chatRowRightClick:)))
+        };
+        right_click.setButtonMask(0x2);
+        row.addGestureRecognizer(&right_click);
         Retained::into_super(row)
     }
 
@@ -867,43 +903,17 @@ impl Controller {
         }
     }
 
-    fn message_menu(&self, index: usize, message: &MessageView, mtm: MainThreadMarker) -> Retained<NSMenu> {
-        let menu = NSMenu::new(mtm);
-        let add = |title: &str, action: Sel, tag: isize| {
-            let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(title), Some(action), &ns("")) };
-            unsafe { item.setTarget(Some(as_target(self))) };
-            item.setTag(tag);
-            menu.addItem(&item);
-        };
-        if !message.deleted {
-            add("Répondre", sel!(chatReply:), index as isize);
-            for (k, emoji) in QUICK_REACTIONS.iter().enumerate() {
-                add(&format!("Réagir {emoji}"), sel!(chatReact:), (index * 10 + k) as isize);
-            }
-            menu.addItem(&NSMenuItem::separatorItem(mtm));
-            if !message.text.is_empty() {
-                add("Copier le texte", sel!(chatCopyMessage:), index as isize);
-            }
-            if code_of(&message.text).is_some() {
-                add("Copier le code", sel!(chatCopyCode:), index as isize);
-            }
-            if message.mine {
-                add("Modifier", sel!(chatEdit:), index as isize);
-                add("Supprimer pour tout le monde", sel!(chatDelete:), index as isize);
-            }
-        }
-        menu
-    }
+    
 
     pub(super) fn chat_profile_id(&self, tag: isize) -> Option<String> {
         self.ivars().chat.borrow().profile_ids.get(tag.max(0) as usize).cloned()
     }
 
-    fn message_at(&self, index: isize) -> Option<MessageView> {
+    pub(super) fn message_at(&self, index: isize) -> Option<MessageView> {
         self.ivars().chat.borrow().row_messages.get(index.max(0) as usize).cloned()
     }
 
-    fn current_conversation_id(&self) -> Option<String> {
+    pub(super) fn current_conversation_id(&self) -> Option<String> {
         self.ivars().chat.borrow().current.clone()
     }
 
@@ -1093,6 +1103,69 @@ impl Controller {
         }
     }
 
+    /// Réaction avec n'importe quel émoji (grille ou saisie libre).
+    pub(super) fn chat_react_with(&self, index: isize, emoji: &str) {
+        let (Some(message), Some(conversation)) = (self.message_at(index), self.current_conversation_id()) else { return };
+        if let Err(error) = self.engine().toggle_reaction(&conversation, &message.id, emoji) {
+            self.engine().set_status(error.to_string());
+        }
+    }
+
+    pub(super) fn chat_pin(&self, index: isize, pinned: bool) {
+        let (Some(message), Some(conversation)) = (self.message_at(index), self.current_conversation_id()) else { return };
+        match self.engine().pin_chat(&conversation, &message.id, pinned) {
+            Ok(()) => self.engine().set_status(if pinned { "Message épinglé" } else { "Message désépinglé" }),
+            Err(error) => self.engine().set_status(error.to_string()),
+        }
+    }
+
+    /// Clic droit sur une ligne de message.
+    pub(super) fn chat_row_right_click(&self, recognizer: &NSClickGestureRecognizer) {
+        let Some(view) = recognizer.view() else { return };
+        let index = self.ivars().chat.borrow().row_index(&view);
+        if let Some(index) = index {
+            self.message_actions(index, &view);
+        }
+    }
+
+    /// Développement : ouvre un menu au démarrage pour le photographier
+    /// (`MAGICPLUS_START_MENU` = message, reaction, transfert, groupe, nouveau, autocollants, epingles).
+    fn debug_start_menu(&self) {
+        thread_local! {
+            static STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
+        }
+        let Ok(kind) = std::env::var("MAGICPLUS_START_MENU") else { return };
+        let started = STARTED.with(|s| {
+            let at = s.get().unwrap_or_else(Instant::now);
+            s.set(Some(at));
+            at
+        });
+        if started.elapsed().as_millis() < 2500 || started.elapsed().as_millis() > 2700 {
+            return;
+        }
+        let last = self.ivars().chat.borrow().rows.len() as isize - 1;
+        let Some(row) = self.ivars().chat.borrow().row_view(last) else { return };
+        let widgets = self.chat_widgets();
+        match kind.as_str() {
+            "message" => self.message_actions(last, &row),
+            "reaction" => self.reaction_picker(last),
+            "transfert" => self.forward_picker(last),
+            "groupe" => self.group_popover(&widgets.group_button),
+            "autocollants" => self.stickers_popover(&widgets.stickers_button, false),
+            _ => {}
+        }
+    }
+
+    /// Carte de profil d'un membre, accrochée à l'en-tête.
+    pub(super) fn show_profile_near_header(&self, id: &str) {
+        let anchor: Retained<NSButton> = self.chat_widgets().group_button.clone();
+        self.show_profile(id, &anchor);
+    }
+
+    pub(super) fn chat_pins(&self, sender: &NSButton) {
+        self.pins_popover(sender);
+    }
+
     pub(super) fn chat_react(&self, tag: isize) {
         let tag = tag.max(0) as usize;
         let (Some(message), Some(conversation)) = (self.message_at((tag / 10) as isize), self.current_conversation_id()) else { return };
@@ -1206,49 +1279,16 @@ impl Controller {
 
     // ---------------------------------------------------------------- menus et boîtes de dialogue
 
-    fn popup(&self, menu: &NSMenu, anchor: &NSView) {
-        let height = anchor.frame().size.height;
-        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, height + 4.0), Some(anchor));
-    }
+    
 
-    fn menu_item(&self, title: &str, action: Option<Sel>, tag: isize) -> Retained<NSMenuItem> {
-        let mtm = self.mtm();
-        let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(title), action, &ns("")) };
-        unsafe { item.setTarget(Some(as_target(self))) };
-        item.setTag(tag);
-        if action.is_none() {
-            item.setEnabled(false);
-        }
-        item
-    }
+    
 
     pub(super) fn chat_message_menu(&self, sender: &NSButton) {
-        if let Some(message) = self.message_at(sender.tag()) {
-            let menu = self.message_menu(sender.tag() as usize, &message, self.mtm());
-            self.popup(&menu, sender);
-        }
+        self.message_actions(sender.tag(), sender);
     }
 
     pub(super) fn chat_new_menu(&self, sender: &NSButton) {
-        let menu = NSMenu::new(self.mtm());
-        menu.addItem(&self.menu_item("Nouveau groupe…", Some(sel!(chatNewGroup:)), 0));
-        menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-        let trusted: Vec<(String, String)> = self
-            .engine()
-            .snapshot()
-            .peers
-            .into_iter()
-            .filter(|p| p.trusted)
-            .map(|p| (p.id, p.name))
-            .collect();
-        if trusted.is_empty() {
-            menu.addItem(&self.menu_item("Associez d'abord un appareil (page Appareils)", None, 0));
-        }
-        for (index, (_, name)) in trusted.iter().enumerate() {
-            menu.addItem(&self.menu_item(&format!("Discuter avec {name}"), Some(sel!(chatOpenDirect:)), index as isize));
-        }
-        self.ivars().chat.borrow_mut().direct_choices = trusted.into_iter().map(|(id, _)| id).collect();
-        self.popup(&menu, sender);
+        self.new_conversation_popover(sender);
     }
 
     pub(super) fn chat_open_direct(&self, index: isize) {
@@ -1332,22 +1372,7 @@ impl Controller {
     }
 
     pub(super) fn chat_group_menu(&self, sender: &NSButton) {
-        let Some(conversation) = self.ivars().chat.borrow().current_conversation.clone() else { return };
-        let menu = NSMenu::new(self.mtm());
-        if conversation.is_creator && !conversation.closed {
-            menu.addItem(&self.menu_item("Ajouter des membres…", Some(sel!(chatAddMembers:)), 0));
-            menu.addItem(&self.menu_item("Renommer le groupe…", Some(sel!(chatRename:)), 0));
-            menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-        }
-        for member in &conversation.members {
-            let state = if member.me { "vous" } else if member.online { "en ligne" } else { "hors ligne" };
-            menu.addItem(&self.menu_item(&format!("{} — {state}", member.name), None, 0));
-        }
-        if !conversation.closed {
-            menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-            menu.addItem(&self.menu_item("Quitter le groupe", Some(sel!(chatLeave:)), 0));
-        }
-        self.popup(&menu, sender);
+        self.group_popover(sender);
     }
 
     pub(super) fn chat_add_members(&self) {
@@ -1393,40 +1418,8 @@ impl Controller {
     }
 
     pub(super) fn chat_stickers_menu(&self) {
-        let mtm = self.mtm();
-        let stickers = self.engine().stickers();
-        let menu = NSMenu::new(mtm);
-        if stickers.is_empty() {
-            menu.addItem(&self.menu_item("Aucun autocollant pour l'instant", None, 0));
-        }
-        let thumbnail = |path: &std::path::Path| {
-            NSImage::initWithContentsOfFile(NSImage::alloc(), &ns(&path.to_string_lossy())).inspect(|image| image.setSize(NSSize::new(56.0, 56.0)))
-        };
-        for (index, sticker) in stickers.iter().take(60).enumerate() {
-            let item = self.menu_item(if sticker.animated { "GIF" } else { "Autocollant" }, Some(sel!(chatSendSticker:)), index as isize);
-            if let Some(image) = thumbnail(&sticker.path) {
-                item.setImage(Some(&image));
-            }
-            menu.addItem(&item);
-        }
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        menu.addItem(&self.menu_item("Créer un autocollant ou ajouter un GIF…", Some(sel!(chatAddSticker:)), 0));
-        if !stickers.is_empty() {
-            let remove = NSMenu::new(mtm);
-            for (index, sticker) in stickers.iter().take(60).enumerate() {
-                let item = self.menu_item(if sticker.animated { "GIF" } else { "Autocollant" }, Some(sel!(chatRemoveSticker:)), index as isize);
-                if let Some(image) = thumbnail(&sticker.path) {
-                    item.setImage(Some(&image));
-                }
-                remove.addItem(&item);
-            }
-            let entry = self.menu_item("Retirer de la bibliothèque", Some(sel!(chatNoop:)), 0);
-            entry.setSubmenu(Some(&remove));
-            menu.addItem(&entry);
-        }
-        self.ivars().chat.borrow_mut().sticker_ids = stickers.into_iter().map(|s| s.id).collect();
         let anchor: Retained<NSButton> = self.chat_widgets().stickers_button.clone();
-        self.popup(&menu, &anchor);
+        self.stickers_popover(&anchor, false);
     }
 
     pub(super) fn chat_send_sticker(&self, index: isize) {

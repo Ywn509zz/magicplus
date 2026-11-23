@@ -508,8 +508,10 @@ impl Chat {
             animated |= attachments.iter().any(|(item, _)| item.frames.row_count() > 1);
             let reactions: String = message.reactions.iter().map(|r| format!("{}{}{}", r.emoji, r.count, r.mine)).collect();
             let signature = format!(
-                "{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
+                "{}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
                 profiles_revision,
+                message.pinned_by,
+                message.forwarded,
                 message.id,
                 message.text,
                 message.edited,
@@ -846,6 +848,10 @@ impl Chat {
                 Ok(()) => self.status("Texte du message copié"),
                 Err(error) => self.status(error.to_string()),
             },
+            "pin" | "unpin" => match self.engine.pin_chat(&conversation, &message.id, action == "pin") {
+                Ok(()) => self.status(if action == "pin" { "Message épinglé" } else { "Message désépinglé" }),
+                Err(error) => self.status(error.to_string()),
+            },
             "copy-code" => {
                 if let Some(code) = super::markdown::code_of(&message.text) {
                     match self.engine.write_local_clipboard(&code) {
@@ -1092,6 +1098,8 @@ fn message_item(message: &MessageView, header: bool, last_mine: bool, attachment
         blocks: if message.deleted || message.system { ModelRc::default() } else { super::markdown::blocks(&message.text) },
         plain: message.text.trim().into(),
         has_code: !message.deleted && super::markdown::code_of(&message.text).is_some(),
+        pinned_by: message.pinned_by.clone().unwrap_or_default().into(),
+        forwarded: message.forwarded.clone().unwrap_or_default().into(),
         has_text: !message.text.trim().is_empty() && !message.deleted,
         deleted: message.deleted,
         edited: message.edited,
@@ -1180,6 +1188,54 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
     on!(on_add_sticker, |chat| chat.add_sticker());
     on!(on_remove_sticker, |chat, id| chat.remove_sticker(&id));
     on!(on_show_profile, |chat, id| chat.show_profile(&id));
+    on!(on_prepare_forward, |chat| {
+        let (Some(ui), current) = (chat.ui(), chat.current()) else { return };
+        let choices: Vec<ChoiceItem> = chat
+            .engine
+            .conversations()
+            .into_iter()
+            .filter(|c| Some(&c.id) != current.as_ref() && !c.closed)
+            .map(|c| ChoiceItem { id: c.id.into(), name: c.title.into(), checked: false })
+            .collect();
+        ui.global::<ChatData>().set_forward_choices(ModelRc::new(VecModel::from(choices)));
+    });
+    on!(on_forward, |chat, index, to| {
+        let (message, from) = {
+            let st = chat.state.borrow();
+            (st.messages.get(index.max(0) as usize).map(|m| m.id.clone()), st.current.clone())
+        };
+        if let (Some(message), Some(from)) = (message, from) {
+            match chat.engine.forward_chat(&from, &message, &to) {
+                Ok(()) => chat.status("Message transféré"),
+                Err(error) => chat.status(format!("Transfert impossible : {error}")),
+            }
+        }
+    });
+    on!(on_prepare_pins, |chat| {
+        let (Some(ui), Some(conversation)) = (chat.ui(), chat.current()) else { return };
+        let pins: Vec<super::PinItem> = chat
+            .engine
+            .pinned_messages(&conversation)
+            .into_iter()
+            .map(|m| {
+                let text: String = markdown::plain(&m.text).chars().take(80).collect();
+                super::PinItem {
+                    id: m.id.into(),
+                    author: m.author_name.into(),
+                    time: time_label(m.sent_ms).into(),
+                    text: if text.is_empty() { "pièce jointe".into() } else { text.into() },
+                }
+            })
+            .collect();
+        ui.global::<ChatData>().set_pins(ModelRc::new(VecModel::from(pins)));
+    });
+    on!(on_unpin, |chat, id| {
+        if let Some(conversation) = chat.current() {
+            if let Err(error) = chat.engine.pin_chat(&conversation, &id, false) {
+                chat.status(error.to_string());
+            }
+        }
+    });
     on!(on_edit_profile, |chat| {
         if let Some(ui) = chat.ui() {
             ui.set_page(3);

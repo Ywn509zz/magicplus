@@ -30,6 +30,9 @@ pub struct DeviceInfo {
     pub platform: String,
     /// Clé publique (base64). L'empreinte est toujours recalculée par le récepteur.
     pub public_key: String,
+    /// Pseudo choisi par l'utilisateur, montré à tous (depuis la 0.9 ; vide sinon).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pseudo: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +199,9 @@ pub enum ChatKind {
         reply_to: Option<String>,
         #[serde(default)]
         attachments: Vec<AttachmentInfo>,
+        /// Message transféré : nom de son auteur d'origine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forwarded: Option<String>,
     },
     Edit {
         target: String,
@@ -215,6 +221,14 @@ pub enum ChatKind {
         members: Vec<MemberInfo>,
     },
     Leave,
+    /// Épingle (ou désépingle) un message ; n'importe quel membre peut le faire.
+    Pin {
+        target: String,
+        pinned: bool,
+    },
+    /// Type d'événement d'une version plus récente : compté mais ignoré.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Réponse du récepteur, une ligne JSON sur la connexion TCP :
@@ -276,11 +290,19 @@ mod tests {
             seq: 3,
             lamport: 9,
             sent_ms: 1,
-            kind: ChatKind::Post { id: "m".into(), text: "**salut**".into(), reply_to: None, attachments: vec![] },
+            kind: ChatKind::Post { id: "m".into(), text: "**salut**".into(), reply_to: None, attachments: vec![], forwarded: None },
         };
         let json = serde_json::to_string(&Message::ChatEvents { conversation: "c".into(), events: vec![event.clone()] }).unwrap();
         assert!(json.contains("\"type\":\"post\""));
         let Message::ChatEvents { events, .. } = serde_json::from_str(&json).unwrap() else { panic!() };
         assert_eq!(events, vec![event]);
+    }
+
+    #[test]
+    fn unknown_chat_events_are_ignored_not_rejected() {
+        let kind: ChatKind = serde_json::from_str(r#"{"type":"sondage","question":"?"}"#).unwrap();
+        assert_eq!(kind, ChatKind::Unknown);
+        let pin: ChatKind = serde_json::from_str(r#"{"type":"pin","target":"m1","pinned":true}"#).unwrap();
+        assert_eq!(pin, ChatKind::Pin { target: "m1".into(), pinned: true });
     }
 }

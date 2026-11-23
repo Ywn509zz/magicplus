@@ -63,6 +63,9 @@ export struct MessageItem {
     plain: string,
     has-text: bool,
     has-code: bool,
+    // Épinglé par (vide sinon), auteur d'origine d'un message transféré (vide sinon).
+    pinned-by: string,
+    forwarded: string,
     deleted: bool,
     edited: bool,
     jumbo: bool,
@@ -88,6 +91,13 @@ export struct StickerItem {
 export struct MemberItem {
     name: string,
     state: string,
+}
+
+export struct PinItem {
+    id: string,
+    author: string,
+    time: string,
+    text: string,
 }
 
 export global ChatData {
@@ -164,6 +174,19 @@ export global ChatData {
     callback remove-sticker(string);
     callback show-profile(string);
     callback edit-profile();
+
+    // ---- menus stylisés
+    in-out property <MessageItem> actions-message;
+    in-out property <int> actions-index;
+    in-out property <length> actions-x;
+    in-out property <length> actions-y;
+    in-out property <int> actions-request;
+    in property <[ChoiceItem]> forward-choices;
+    in property <[PinItem]> pins;
+    callback prepare-forward();
+    callback forward(int, string);
+    callback prepare-pins();
+    callback unpin(string);
 }
 
 // ------------------------------------------------------------------ petits éléments
@@ -460,6 +483,74 @@ component SystemRow inherits Rectangle {
     }
 }
 
+// Ligne de menu stylisée : icône, texte, survol ; rouge pour une action dangereuse.
+component MenuRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> danger;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 32px;
+    border-radius: 6px;
+    background: touch.has-hover && root.enabled ? (root.danger ? Theme.danger.with-alpha(0.14) : Theme.accent.with-alpha(0.14)) : transparent;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                colorize: root.danger ? Theme.danger : touch.has-hover && root.enabled ? Theme.accent : Theme.subtle;
+                width: 16px;
+                height: 16px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.danger ? Theme.danger : root.enabled ? Theme.text : Theme.subtle;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component MenuTitle inherits Text {
+    color: Theme.subtle;
+    font-size: 10.5px;
+    font-weight: 700;
+    height: 22px;
+    vertical-alignment: center;
+}
+
+component MenuLine inherits Rectangle {
+    height: 9px;
+    Rectangle {
+        y: 4px;
+        height: 1px;
+        background: Theme.card-border;
+    }
+}
+
+// Fond commun des menus : carte arrondie avec ombre.
+component MenuPanel inherits Rectangle {
+    background: Theme.popup;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    drop-shadow-blur: 14px;
+    drop-shadow-color: #00000050;
+}
+
 component MessageRow inherits Rectangle {
     in property <MessageItem> message;
     in property <int> index;
@@ -469,251 +560,201 @@ component MessageRow inherits Rectangle {
     min-height: body.min-height;
     background: hover.has-hover ? Theme.row-hover : transparent;
 
+    // Menu d'actions stylisé (dessiné par la page), à la position donnée (fenêtre).
+    function open-actions(x: length, y: length) {
+        ChatData.actions-message = root.message;
+        ChatData.actions-index = root.index;
+        ChatData.actions-x = x;
+        ChatData.actions-y = y;
+        ChatData.actions-request += 1;
+    }
+
     hover := TouchArea {
-        menu := ContextMenuArea {
-            enabled: !root.message.deleted;
-            Menu {
-                if root.can-act: MenuItem {
-                    title: "Répondre";
-                    activated => {
-                        ChatData.message-action(root.index, "reply");
-                    }
-                }
-                if root.can-act: Menu {
-                    title: "Réagir";
-                    MenuItem {
-                        title: "👍";
-                        activated => {
-                            ChatData.message-action(root.index, "react:👍");
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && !root.message.deleted {
+                root.open-actions(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        body := HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 24px;
+            padding-top: root.message.header ? 12px : 2px;
+            padding-bottom: 2px;
+            spacing: 14px;
+
+            if root.message.header: VerticalLayout {
+                alignment: start;
+                Avatar {
+                    initials: root.message.initials;
+                    tint: root.message.color;
+                    photo: root.message.photo;
+                    has-photo: root.message.has-photo;
+                    size: 38px;
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            ChatData.show-profile(root.message.author-id);
                         }
-                    }
-                    MenuItem {
-                        title: "❤️";
-                        activated => {
-                            ChatData.message-action(root.index, "react:❤️");
-                        }
-                    }
-                    MenuItem {
-                        title: "😂";
-                        activated => {
-                            ChatData.message-action(root.index, "react:😂");
-                        }
-                    }
-                    MenuItem {
-                        title: "😮";
-                        activated => {
-                            ChatData.message-action(root.index, "react:😮");
-                        }
-                    }
-                    MenuItem {
-                        title: "😢";
-                        activated => {
-                            ChatData.message-action(root.index, "react:😢");
-                        }
-                    }
-                    MenuItem {
-                        title: "🎉";
-                        activated => {
-                            ChatData.message-action(root.index, "react:🎉");
-                        }
-                    }
-                }
-                if root.message.has-text: MenuItem {
-                    title: "Copier le texte";
-                    activated => {
-                        ChatData.message-action(root.index, "copy");
-                    }
-                }
-                if root.message.has-code: MenuItem {
-                    title: "Copier le code";
-                    activated => {
-                        ChatData.message-action(root.index, "copy-code");
-                    }
-                }
-                if root.message.mine && root.can-act && root.message.has-text: MenuItem {
-                    title: "Modifier";
-                    activated => {
-                        ChatData.message-action(root.index, "edit");
-                    }
-                }
-                if root.message.mine && root.can-act: MenuItem {
-                    title: "Supprimer pour tout le monde";
-                    activated => {
-                        ChatData.message-action(root.index, "delete");
                     }
                 }
             }
+            if !root.message.header: Rectangle {
+                width: 38px;
+            }
 
-            body := HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 24px;
-                padding-top: root.message.header ? 12px : 2px;
-                padding-bottom: 2px;
-                spacing: 14px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 4px;
 
-                if root.message.header: VerticalLayout {
+                if root.message.reply != "": HorizontalLayout {
+                    spacing: 6px;
+                    Image {
+                        source: @image-url("icons/reply.svg");
+                        colorize: Theme.subtle;
+                        width: 14px;
+                        height: 14px;
+                        y: 2px;
+                    }
+                    Text {
+                        text: root.message.reply;
+                        color: Theme.subtle;
+                        font-size: 12px;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                if root.message.header: HorizontalLayout {
+                    spacing: 8px;
                     alignment: start;
-                    Avatar {
-                        initials: root.message.initials;
-                        tint: root.message.color;
-                        photo: root.message.photo;
-                        has-photo: root.message.has-photo;
-                        size: 38px;
+                    Text {
+                        text: root.message.author;
+                        color: root.message.mine ? Theme.accent : Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: root.message.time;
+                        color: Theme.subtle;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if root.message.forwarded != "": Text {
+                    text: "↪ Transféré · message de " + root.message.forwarded;
+                    color: Theme.subtle;
+                    font-size: 11.5px;
+                    font-italic: true;
+                }
+                if root.message.deleted || root.message.has-text: HorizontalLayout {
+                    alignment: start;
+                    Rectangle {
+                        max-width: root.bubble-max;
+                        preferred-width: bubble.preferred-width;
+                        preferred-height: bubble.preferred-height;
+                        min-height: bubble.min-height;
+                        border-radius: 14px;
+                        background: root.message.jumbo && !root.message.deleted ? transparent : root.message.mine ? Theme.mine-bubble : Theme.bubble;
+
+                        bubble := VerticalLayout {
+                            padding-left: root.message.jumbo ? 2px : 12px;
+                            padding-right: root.message.jumbo ? 2px : 12px;
+                            padding-top: 7px;
+                            padding-bottom: 7px;
+                            spacing: 2px;
+
+                            if root.message.deleted: Text {
+                                text: "Message supprimé";
+                                color: Theme.subtle;
+                                font-size: 13px;
+                                font-italic: true;
+                            }
+                            if !root.message.deleted && root.message.jumbo: Text {
+                                text: root.message.plain;
+                                font-size: 34px;
+                            }
+                            if !root.message.deleted && !root.message.jumbo: MarkdownView {
+                                blocks: root.message.blocks;
+                                link-clicked(url) => {
+                                    ChatData.open-link(url);
+                                }
+                            }
+                            if root.message.edited && !root.message.deleted: Text {
+                                text: "(modifié)";
+                                color: Theme.subtle;
+                                font-size: 10px;
+                            }
+                        }
+                    }
+                }
+
+                for item in root.message.attachments: HorizontalLayout {
+                    alignment: start;
+                    if item.kind == 0: Rectangle {
+                        width: item.width;
+                        height: item.height;
+                        border-radius: 8px;
+                        clip: true;
+                        AnimatedImage {
+                            still: item.image;
+                            frames: item.frames;
+                            frame-ms: item.frame-ms;
+                            width: parent.width;
+                            height: parent.height;
+                        }
                         TouchArea {
                             mouse-cursor: MouseCursor.pointer;
                             clicked => {
-                                ChatData.show-profile(root.message.author-id);
+                                ChatData.open-path(item.path);
                             }
                         }
                     }
-                }
-                if !root.message.header: Rectangle {
-                    width: 38px;
-                }
-
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 4px;
-
-                    if root.message.reply != "": HorizontalLayout {
-                        spacing: 6px;
-                        Image {
-                            source: @image-url("icons/reply.svg");
-                            colorize: Theme.subtle;
-                            width: 14px;
-                            height: 14px;
-                            y: 2px;
-                        }
+                    if item.kind == 3: Rectangle {
+                        width: item.width;
+                        height: item.height;
+                        border-radius: 8px;
+                        background: Theme.bubble;
                         Text {
-                            text: root.message.reply;
+                            text: "Chargement…";
                             color: Theme.subtle;
                             font-size: 12px;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                    }
-
-                    if root.message.header: HorizontalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        Text {
-                            text: root.message.author;
-                            color: root.message.mine ? Theme.accent : Theme.text;
-                            font-size: 14px;
-                            font-weight: 600;
-                        }
-                        Text {
-                            text: root.message.time;
-                            color: Theme.subtle;
-                            font-size: 11px;
+                            width: parent.width;
+                            height: parent.height;
+                            horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
+                    if item.kind == 1 || item.kind == 2: FileCard {
+                        item: item;
+                        open(path) => {
+                            ChatData.open-path(path);
+                        }
+                    }
+                }
 
-                    if root.message.deleted || root.message.has-text: HorizontalLayout {
-                        alignment: start;
-                        Rectangle {
-                            max-width: root.bubble-max;
-                            preferred-width: bubble.preferred-width;
-                            preferred-height: bubble.preferred-height;
-                            min-height: bubble.min-height;
-                            border-radius: 14px;
-                            background: root.message.jumbo && !root.message.deleted ? transparent : root.message.mine ? Theme.mine-bubble : Theme.bubble;
-
-                            bubble := VerticalLayout {
-                                padding-left: root.message.jumbo ? 2px : 12px;
-                                padding-right: root.message.jumbo ? 2px : 12px;
-                                padding-top: 7px;
-                                padding-bottom: 7px;
-                                spacing: 2px;
-
-                                if root.message.deleted: Text {
-                                    text: "Message supprimé";
-                                    color: Theme.subtle;
-                                    font-size: 13px;
-                                    font-italic: true;
-                                }
-                                if !root.message.deleted && root.message.jumbo: Text {
-                                    text: root.message.plain;
-                                    font-size: 34px;
-                                }
-                                if !root.message.deleted && !root.message.jumbo: MarkdownView {
-                                    blocks: root.message.blocks;
-                                    link-clicked(url) => {
-                                        ChatData.open-link(url);
-                                    }
-                                }
-                                if root.message.edited && !root.message.deleted: Text {
-                                    text: "(modifié)";
-                                    color: Theme.subtle;
-                                    font-size: 10px;
-                                }
+                if root.message.reactions.length > 0: HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+                    for reaction in root.message.reactions: ReactionPill {
+                        reaction: reaction;
+                        clicked => {
+                            if root.can-act {
+                                ChatData.toggle-reaction(root.index, reaction.emoji);
                             }
                         }
                     }
+                }
 
-                    for item in root.message.attachments: HorizontalLayout {
-                        alignment: start;
-                        if item.kind == 0: Rectangle {
-                            width: item.width;
-                            height: item.height;
-                            border-radius: 8px;
-                            clip: true;
-                            AnimatedImage {
-                                still: item.image;
-                                frames: item.frames;
-                                frame-ms: item.frame-ms;
-                                width: parent.width;
-                                height: parent.height;
-                            }
-                            TouchArea {
-                                mouse-cursor: MouseCursor.pointer;
-                                clicked => {
-                                    ChatData.open-path(item.path);
-                                }
-                            }
-                        }
-                        if item.kind == 3: Rectangle {
-                            width: item.width;
-                            height: item.height;
-                            border-radius: 8px;
-                            background: Theme.bubble;
-                            Text {
-                                text: "Chargement…";
-                                color: Theme.subtle;
-                                font-size: 12px;
-                                width: parent.width;
-                                height: parent.height;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                        if item.kind == 1 || item.kind == 2: FileCard {
-                            item: item;
-                            open(path) => {
-                                ChatData.open-path(path);
-                            }
-                        }
-                    }
-
-                    if root.message.reactions.length > 0: HorizontalLayout {
-                        spacing: 4px;
-                        alignment: start;
-                        for reaction in root.message.reactions: ReactionPill {
-                            reaction: reaction;
-                            clicked => {
-                                if root.can-act {
-                                    ChatData.toggle-reaction(root.index, reaction.emoji);
-                                }
-                            }
-                        }
-                    }
-
-                    if root.message.status != "": Text {
-                        text: root.message.status;
-                        color: Theme.subtle;
-                        font-size: 11px;
-                    }
+                if root.message.pinned-by != "": Text {
+                    text: "📌 Épinglé par " + root.message.pinned-by;
+                    color: Theme.subtle;
+                    font-size: 11px;
+                }
+                if root.message.status != "": Text {
+                    text: root.message.status;
+                    color: Theme.subtle;
+                    font-size: 11px;
                 }
             }
         }
@@ -769,7 +810,7 @@ component MessageRow inherits Rectangle {
                     icon: @image-url("icons/more.svg");
                     size: 30px;
                     clicked => {
-                        menu.show({ x: hover.width - 200px, y: self.y + 34px });
+                        root.open-actions(self.absolute-position.x - 210px, self.absolute-position.y + 32px);
                     }
                 }
             }
@@ -1085,98 +1126,80 @@ component ConversationPane inherits Rectangle {
         // ---- en-tête
         Rectangle {
             height: 60px;
-            group-menu := ContextMenuArea {
-                enabled: ChatData.is-group;
-                Menu {
-                    if ChatData.is-creator && !ChatData.closed: MenuItem {
-                        title: "Ajouter des membres…";
-                        activated => {
-                            ChatData.add-members();
-                        }
-                    }
-                    if ChatData.is-creator && !ChatData.closed: MenuItem {
-                        title: "Renommer le groupe…";
-                        activated => {
-                            ChatData.rename();
-                        }
-                    }
-                    if ChatData.is-creator && !ChatData.closed: MenuSeparator { }
-                    for member in ChatData.members: MenuItem {
-                        title: member.name + " — " + member.state;
-                        enabled: false;
-                    }
-                    if !ChatData.closed: MenuSeparator { }
-                    if !ChatData.closed: MenuItem {
-                        title: "Quitter le groupe";
-                        activated => {
-                            ChatData.leave();
+HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 14px;
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    Avatar {
+                        initials: ChatData.initials;
+                        tint: ChatData.color;
+                        photo: ChatData.photo;
+                        has-photo: ChatData.has-photo;
+                        size: 34px;
+                        show-presence: !ChatData.is-group;
+                        online: ChatData.online;
+                        ring: Theme.chat-bg;
+                        TouchArea {
+                            enabled: !ChatData.is-group;
+                            mouse-cursor: ChatData.is-group ? MouseCursor.default : MouseCursor.pointer;
+                            clicked => {
+                                ChatData.show-profile(ChatData.peer-id);
+                            }
                         }
                     }
                 }
-
-                HorizontalLayout {
-                    padding-left: 18px;
-                    padding-right: 14px;
-                    spacing: 12px;
-                    VerticalLayout {
-                        alignment: center;
-                        Avatar {
-                            initials: ChatData.initials;
-                            tint: ChatData.color;
-                            photo: ChatData.photo;
-                            has-photo: ChatData.has-photo;
-                            size: 34px;
-                            show-presence: !ChatData.is-group;
-                            online: ChatData.online;
-                            ring: Theme.chat-bg;
-                            TouchArea {
-                                enabled: !ChatData.is-group;
-                                mouse-cursor: ChatData.is-group ? MouseCursor.default : MouseCursor.pointer;
-                                clicked => {
-                                    ChatData.show-profile(ChatData.peer-id);
-                                }
-                            }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 1px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: ChatData.title;
+                        color: Theme.text;
+                        font-size: 16px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: ChatData.subtitle;
+                        color: Theme.subtle;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: @image-url("icons/pin.svg");
+                        active: pins-popup.is-open;
+                        clicked => {
+                            ChatData.prepare-pins();
+                            pins-popup.show();
                         }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 1px;
-                        horizontal-stretch: 1;
-                        Text {
-                            text: ChatData.title;
-                            color: Theme.text;
-                            font-size: 16px;
-                            font-weight: 600;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: ChatData.subtitle;
-                            color: Theme.subtle;
-                            font-size: 12px;
-                            overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: CanvasData.open ? @image-url("icons/chat.svg") : @image-url("icons/canvas.svg");
+                        active: CanvasData.open;
+                        clicked => {
+                            CanvasData.toggle();
                         }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: CanvasData.open ? @image-url("icons/chat.svg") : @image-url("icons/canvas.svg");
-                            active: CanvasData.open;
-                            clicked => {
-                                CanvasData.toggle();
-                            }
-                        }
-                    }
-                    if ChatData.is-group: VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            icon: @image-url("icons/people.svg");
-                            clicked => {
-                                group-menu.show({ x: self.x - 220px, y: 52px });
-                            }
+                }
+                if ChatData.is-group: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: @image-url("icons/people.svg");
+                        clicked => {
+                            group-popup.show();
                         }
                     }
                 }
             }
+        
         }
 
         Divider { }
@@ -1338,6 +1361,311 @@ component ConversationPane inherits Rectangle {
         width: parent.width;
         height: parent.height - 61px;
     }
+
+    // ------------------------------------------------ menus stylisés
+    property <int> actions-request: ChatData.actions-request;
+    property <length> menu-x: Math.max(8px, Math.min(ChatData.actions-x - root.absolute-position.x, root.width - 268px));
+    property <length> menu-y: ChatData.actions-y - root.absolute-position.y;
+    property <[string]> reaction-emojis: [
+        "👍", "👎", "❤️", "🔥", "😂", "🤣", "😮", "😢",
+        "😭", "😡", "🎉", "🙏", "👏", "🙌", "💪", "👀",
+        "✅", "❌", "⭐", "💯", "🤔", "😍", "🥰", "😎",
+        "🤩", "🥳", "😴", "🤯", "😱", "🤗", "😇", "😅",
+        "🙃", "😬", "🫡", "🤝", "👋", "✌️", "🤞", "💡",
+        "📌", "🚀", "🍕", "☕", "🎵", "🎮", "🌞", "🦀"
+    ];
+    property <string> other-emoji;
+    changed actions-request => {
+        actions-popup.show();
+    }
+
+    actions-popup := PopupWindow {
+        x: root.menu-x;
+        y: Math.max(8px, Math.min(root.menu-y, root.height - self.height - 8px));
+        width: 260px;
+        height: actions-col.preferred-height + 2px;
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            actions-col := VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                if !ChatData.closed: HorizontalLayout {
+                    spacing: 2px;
+                    for emoji in ["👍", "❤️", "😂", "😮", "😢", "🎉"]: EmojiButton {
+                        emoji: emoji;
+                        size: 32px;
+                        clicked => {
+                            actions-popup.close();
+                            ChatData.toggle-reaction(ChatData.actions-index, emoji);
+                        }
+                    }
+                    EmojiButton {
+                        emoji: "➕";
+                        size: 32px;
+                        clicked => {
+                            actions-popup.close();
+                            reaction-popup.show();
+                        }
+                    }
+                }
+                if !ChatData.closed: MenuLine { }
+                if !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/reply.svg");
+                    text: "Répondre";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "reply");
+                    }
+                }
+                if !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/forward.svg");
+                    text: "Transférer…";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.prepare-forward();
+                        forward-popup.show();
+                    }
+                }
+                if !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/pin.svg");
+                    text: ChatData.actions-message.pinned-by == "" ? "Épingler" : "Désépingler";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, ChatData.actions-message.pinned-by == "" ? "pin" : "unpin");
+                    }
+                }
+                if ChatData.actions-message.has-text: MenuRow {
+                    icon: @image-url("icons/copy.svg");
+                    text: "Copier le texte";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "copy");
+                    }
+                }
+                if ChatData.actions-message.has-code: MenuRow {
+                    icon: @image-url("icons/code.svg");
+                    text: "Copier le code";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "copy-code");
+                    }
+                }
+                if ChatData.actions-message.mine && !ChatData.closed: MenuLine { }
+                if ChatData.actions-message.mine && ChatData.actions-message.has-text && !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/edit.svg");
+                    text: "Modifier";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "edit");
+                    }
+                }
+                if ChatData.actions-message.mine && !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/delete.svg");
+                    text: "Supprimer pour tout le monde";
+                    danger: true;
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "delete");
+                    }
+                }
+            }
+        }
+    }
+
+    reaction-popup := PopupWindow {
+        x: Math.max(8px, Math.min(ChatData.actions-x - root.absolute-position.x, root.width - 300px));
+        y: Math.max(8px, Math.min(root.menu-y, root.height - self.height - 8px));
+        width: 8 * 34px + 20px;
+        height: 6 * 34px + 84px;
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            MenuTitle {
+                x: 10px;
+                y: 6px;
+                text: "RÉAGIR AVEC…";
+            }
+            for emoji[i] in root.reaction-emojis: EmojiButton {
+                x: 10px + Math.mod(i, 8) * 34px;
+                y: 30px + Math.floor(i / 8) * 34px;
+                size: 34px;
+                emoji: emoji;
+                clicked => {
+                    reaction-popup.close();
+                    ChatData.toggle-reaction(ChatData.actions-index, emoji);
+                }
+            }
+            HorizontalLayout {
+                x: 10px;
+                y: 30px + 6 * 34px + 8px;
+                width: parent.width - 20px;
+                height: 32px;
+                spacing: 6px;
+                LineEdit {
+                    text <=> root.other-emoji;
+                    placeholder-text: "Autre émoji (Win + .)";
+                    horizontal-stretch: 1;
+                    accepted(value) => {
+                        if value != "" {
+                            reaction-popup.close();
+                            ChatData.toggle-reaction(ChatData.actions-index, value);
+                            root.other-emoji = "";
+                        }
+                    }
+                }
+                Button {
+                    text: "Réagir";
+                    clicked => {
+                        if root.other-emoji != "" {
+                            reaction-popup.close();
+                            ChatData.toggle-reaction(ChatData.actions-index, root.other-emoji);
+                            root.other-emoji = "";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    forward-popup := PopupWindow {
+        x: root.menu-x;
+        y: Math.max(8px, Math.min(root.menu-y, root.height - self.height - 8px));
+        width: 260px;
+        height: forward-col.preferred-height + 2px;
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            forward-col := VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuTitle {
+                    text: "TRANSFÉRER VERS";
+                }
+                if ChatData.forward-choices.length == 0: Text {
+                    text: "Aucune autre discussion : créez-en une avec +.";
+                    color: Theme.subtle;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                for choice in ChatData.forward-choices: MenuRow {
+                    icon: @image-url("icons/chat.svg");
+                    text: choice.name;
+                    clicked => {
+                        forward-popup.close();
+                        ChatData.forward(ChatData.actions-index, choice.id);
+                    }
+                }
+            }
+        }
+    }
+
+    pins-popup := PopupWindow {
+        x: root.width - 340px;
+        y: 58px;
+        width: 330px;
+        height: Math.min(pins-col.preferred-height + 2px, root.height - 80px);
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            pins-col := VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                MenuTitle {
+                    text: "MESSAGES ÉPINGLÉS (" + ChatData.pins.length + ")";
+                }
+                if ChatData.pins.length == 0: Text {
+                    text: "Aucun pour l'instant : « Épingler » dans le menu d'un message (clic droit ou ⋯).";
+                    color: Theme.subtle;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                for pin in ChatData.pins: Rectangle {
+                    height: 50px;
+                    border-radius: 6px;
+                    background: Theme.bubble.with-alpha(0.6);
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 4px;
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: pin.author + " · " + pin.time;
+                                color: Theme.subtle;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: pin.text;
+                                color: Theme.text;
+                                font-size: 13px;
+                                overflow: elide;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            IconButton {
+                                icon: @image-url("icons/close.svg");
+                                size: 28px;
+                                clicked => {
+                                    ChatData.unpin(pin.id);
+                                    ChatData.prepare-pins();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    group-popup := PopupWindow {
+        x: root.width - 280px;
+        y: 56px;
+        width: 270px;
+        height: group-col.preferred-height + 2px;
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            group-col := VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                if ChatData.is-creator && !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/person-add.svg");
+                    text: "Ajouter des membres…";
+                    clicked => {
+                        group-popup.close();
+                        ChatData.add-members();
+                    }
+                }
+                if ChatData.is-creator && !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/edit.svg");
+                    text: "Renommer le groupe…";
+                    clicked => {
+                        group-popup.close();
+                        ChatData.rename();
+                    }
+                }
+                if ChatData.is-creator && !ChatData.closed: MenuLine { }
+                MenuTitle {
+                    text: "MEMBRES (" + ChatData.members.length + ")";
+                }
+                for member in ChatData.members: MenuRow {
+                    icon: @image-url("icons/people.svg");
+                    text: member.name + " — " + member.state;
+                    enabled: false;
+                }
+                if !ChatData.closed: MenuLine { }
+                if !ChatData.closed: MenuRow {
+                    icon: @image-url("icons/leave.svg");
+                    text: "Quitter le groupe";
+                    danger: true;
+                    clicked => {
+                        group-popup.close();
+                        ChatData.leave();
+                    }
+                }
+            }
+        }
+    }
 }
 
 
@@ -1354,50 +1682,29 @@ export component ChatPage inherits Rectangle {
             VerticalLayout {
                 Rectangle {
                     height: 60px;
-                    new-menu := ContextMenuArea {
-                        Menu {
-                            MenuItem {
-                                title: "Nouveau groupe…";
-                                activated => {
-                                    ChatData.new-group();
-                                }
-                            }
-                            MenuSeparator { }
-                            if ChatData.direct-choices.length == 0: MenuItem {
-                                title: "Associez d'abord un appareil (page Appareils)";
-                                enabled: false;
-                            }
-                            for choice in ChatData.direct-choices: MenuItem {
-                                title: "Discuter avec " + choice.name;
-                                activated => {
-                                    ChatData.open-direct(choice.id);
-                                }
-                            }
+HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        Text {
+                            text: "Discussions";
+                            color: Theme.text;
+                            font-size: 20px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-
-                        HorizontalLayout {
-                            padding-left: 18px;
-                            padding-right: 12px;
-                            spacing: 8px;
-                            Text {
-                                text: "Discussions";
-                                color: Theme.text;
-                                font-size: 20px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                new-button := IconButton {
-                                    icon: @image-url("icons/plus.svg");
-                                    clicked => {
-                                        new-menu.show({ x: 280px - 230px, y: 50px });
-                                    }
+                        VerticalLayout {
+                            alignment: center;
+                            new-button := IconButton {
+                                icon: @image-url("icons/plus.svg");
+                                clicked => {
+                                    new-popup.show();
                                 }
                             }
                         }
                     }
+                
                 }
 
                 Divider { }
@@ -1486,6 +1793,46 @@ export component ChatPage inherits Rectangle {
         }
     }
 
+
+    new-popup := PopupWindow {
+        x: 20px;
+        y: 56px;
+        width: 260px;
+        height: new-col.preferred-height + 2px;
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            new-col := VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+                MenuRow {
+                    icon: @image-url("icons/people.svg");
+                    text: "Nouveau groupe…";
+                    clicked => {
+                        new-popup.close();
+                        ChatData.new-group();
+                    }
+                }
+                MenuLine { }
+                MenuTitle {
+                    text: "DISCUTER AVEC";
+                }
+                if ChatData.direct-choices.length == 0: Text {
+                    text: "Associez d'abord un appareil (page Appareils).";
+                    color: Theme.subtle;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                for choice in ChatData.direct-choices: MenuRow {
+                    icon: @image-url("icons/chat.svg");
+                    text: choice.name;
+                    clicked => {
+                        new-popup.close();
+                        ChatData.open-direct(choice.id);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ boîte de dialogue

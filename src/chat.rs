@@ -140,6 +140,10 @@ pub struct MessageView {
     pub reactions: Vec<ReactionView>,
     pub status: MessageStatus,
     pub lamport: u64,
+    /// Message transféré : nom de son auteur d'origine.
+    pub forwarded: Option<String>,
+    /// Épinglé (par qui).
+    pub pinned_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +212,10 @@ struct Msg {
     deleted: bool,
     system: bool,
     reactions: BTreeMap<String, BTreeSet<String>>,
+    /// Message transféré : auteur d'origine.
+    forwarded: Option<String>,
+    /// Épinglé par ce membre.
+    pinned: Option<String>,
 }
 
 struct Conversation {
@@ -471,9 +479,11 @@ fn apply_to_messages(messages: &mut Vec<Msg>, stored: &Stored) {
     };
 
     match &event.kind {
-        ChatKind::Post { id, text, reply_to, attachments } => insert(
+        ChatKind::Post { id, text, reply_to, attachments, forwarded } => insert(
             messages,
             Msg {
+                forwarded: forwarded.clone(),
+                pinned: None,
                 id: id.clone(),
                 author: author.to_string(),
                 seq: event.seq,
@@ -538,17 +548,56 @@ fn apply_to_messages(messages: &mut Vec<Msg>, stored: &Stored) {
                         deleted: false,
                         system: true,
                         reactions: BTreeMap::new(),
+                        forwarded: None,
+                        pinned: None,
                     },
                 );
             }
         }
+        ChatKind::Pin { target, pinned } => {
+            if let Some(index) = find(messages, target) {
+                if messages[index].deleted {
+                    return;
+                }
+                messages[index].pinned = pinned.then(|| author.to_string());
+                if *pinned {
+                    // « X a épinglé un message » (texte « 📌 » ; la cible est dans `reply_to`).
+                    insert(
+                        messages,
+                        Msg {
+                            id: format!("epingle-{author}-{}", event.seq),
+                            author: author.to_string(),
+                            seq: event.seq,
+                            lamport: event.lamport,
+                            sent_ms: event.sent_ms,
+                            text: PIN_NOTE.to_string(),
+                            reply_to: Some(target.clone()),
+                            attachments: Vec::new(),
+                            edited: false,
+                            deleted: false,
+                            system: true,
+                            reactions: BTreeMap::new(),
+                            forwarded: None,
+                            pinned: None,
+                        },
+                    );
+                }
+            }
+        }
+        ChatKind::Unknown => {}
     }
 }
+
+/// Texte des messages système « a épinglé un message ».
+const PIN_NOTE: &str = "📌";
 
 /// Vérifie un événement reçu (longueurs, identifiants) avant de l'appliquer.
 fn validate(kind: &ChatKind) -> Result<()> {
     match kind {
-        ChatKind::Post { id, text, reply_to, attachments } => {
+        ChatKind::Post { id, text, reply_to, attachments, forwarded } => {
+            if forwarded.as_deref().is_some_and(|name| name.chars().count() > 80) {
+                bail!("message invalide");
+            }
             if !valid_name(id) || text.len() > MAX_CHAT_TEXT * 4 || attachments.len() > MAX_ATTACHMENTS {
                 bail!("message invalide");
             }
@@ -582,7 +631,12 @@ fn validate(kind: &ChatKind) -> Result<()> {
                 bail!("groupe invalide");
             }
         }
-        ChatKind::Leave => {}
+        ChatKind::Leave | ChatKind::Unknown => {}
+        ChatKind::Pin { target, .. } => {
+            if !valid_name(target) {
+                bail!("épingle invalide");
+            }
+        }
     }
     Ok(())
 }
@@ -1039,9 +1093,10 @@ impl Engine {
 
     /// Envoie un message (Markdown), éventuellement en réponse, avec des pièces jointes.
     pub fn send_chat(&self, conversation: &str, text: &str, reply_to: Option<&str>, files: &[PathBuf]) -> Result<()> {
-        self.send_chat_with_kind(conversation, text, reply_to, files, None)
+        self.send_chat_with_kind(conversation, text, reply_to, files, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_chat_with_kind(
         &self,
         conversation: &str,
@@ -1049,6 +1104,7 @@ impl Engine {
         reply_to: Option<&str>,
         files: &[PathBuf],
         forced_kind: Option<AttachmentKind>,
+        forwarded: Option<String>,
     ) -> Result<()> {
         let text = text.trim_end();
         if text.trim().is_empty() && files.is_empty() {
@@ -1095,6 +1151,7 @@ impl Engine {
                     text: text.to_string(),
                     reply_to: reply_to.map(str::to_string),
                     attachments: attachments.iter().map(|(_, info)| info.clone()).collect(),
+                    forwarded,
                 },
             )?;
             (members, me)
@@ -1213,6 +1270,7 @@ impl Engine {
             .filter(|(_, peer)| peer.last_seen.elapsed() < ONLINE_WINDOW)
             .map(|(id, _)| id.clone())
             .collect();
+        let display = self.inner.display_names();
         let chat = lock(&self.inner.chat);
         let me = chat.me.clone();
         let mut list: Vec<ConversationView> = chat
@@ -1220,9 +1278,11 @@ impl Engine {
             .values()
             .map(|state| {
                 let meta = &state.meta;
-                let name_of = |id: &str| meta.members.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_default();
+                let name_of = |id: &str| {
+                    display.get(id).cloned().unwrap_or_else(|| meta.members.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_default())
+                };
                 let title = match meta.kind {
-                    ConversationKind::Direct => meta.members.iter().find(|m| m.id != me).map(|m| m.name.clone()).unwrap_or_default(),
+                    ConversationKind::Direct => meta.members.iter().find(|m| m.id != me).map(|m| name_of(&m.id)).unwrap_or_default(),
                     ConversationKind::Group => meta.name.clone(),
                 };
                 let last = state.messages.iter().rev().find(|m| !m.deleted);
@@ -1258,7 +1318,7 @@ impl Engine {
                     members: meta
                         .members
                         .iter()
-                        .map(|m| MemberView { id: m.id.clone(), name: m.name.clone(), online: m.id == me || online.contains(&m.id), me: m.id == me })
+                        .map(|m| MemberView { id: m.id.clone(), name: name_of(&m.id), online: m.id == me || online.contains(&m.id), me: m.id == me })
                         .collect(),
                     unread,
                     last_preview,
@@ -1280,6 +1340,7 @@ impl Engine {
             .filter(|t| !t.sending)
             .filter_map(|t| t.attachment.clone().map(|id| (id, t.progress)))
             .collect();
+        let display = self.inner.display_names();
         let chat = lock(&self.inner.chat);
         let me = chat.me.clone();
         let Some(state) = chat.conversations.get(conversation) else { return Vec::new() };
@@ -1287,6 +1348,8 @@ impl Engine {
         let name_of = |id: &str| {
             if id == me {
                 "Vous".to_string()
+            } else if let Some(name) = display.get(id) {
+                name.clone()
             } else {
                 meta.members.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_else(|| "Ancien membre".to_string())
             }
@@ -1357,7 +1420,13 @@ impl Engine {
                     author_name: name_of(&m.author),
                     mine: m.author == me,
                     system: m.system,
-                    text: m.text.clone(),
+                    text: if m.system && m.text == PIN_NOTE {
+                        let pinned = m.reply_to.as_deref().and_then(|target| state.messages.iter().find(|o| o.id == target));
+                        let what = pinned.map(|o| excerpt(&o.text)).filter(|t| !t.is_empty()).unwrap_or_else(|| "un message".to_string());
+                        format!("📌 {} a épinglé « {what} »", name_of(&m.author))
+                    } else {
+                        m.text.clone()
+                    },
                     sent_ms: m.sent_ms,
                     edited: m.edited,
                     deleted: m.deleted,
@@ -1366,9 +1435,52 @@ impl Engine {
                     reactions,
                     status,
                     lamport: m.lamport,
+                    forwarded: m.forwarded.clone(),
+                    pinned_by: m.pinned.as_deref().map(&name_of),
                 }
             })
             .collect()
+    }
+
+    /// Épingle ou désépingle un message (n'importe quel membre).
+    pub fn pin_chat(&self, conversation: &str, message: &str, pinned: bool) -> Result<()> {
+        let mut chat = lock(&self.inner.chat);
+        let state = chat.conversations.get(conversation).ok_or_else(|| anyhow!("conversation introuvable"))?;
+        if state.meta.closed {
+            bail!("vous avez quitté ce groupe");
+        }
+        let target = state.messages.iter().find(|m| m.id == message).ok_or_else(|| anyhow!("message introuvable"))?;
+        if target.system || target.deleted {
+            bail!("ce message ne peut pas être épinglé");
+        }
+        chat.emit(conversation, ChatKind::Pin { target: message.to_string(), pinned })?;
+        Ok(())
+    }
+
+    /// Messages épinglés d'une conversation, du plus récent au plus ancien.
+    pub fn pinned_messages(&self, conversation: &str) -> Vec<MessageView> {
+        let mut pinned: Vec<MessageView> = self.messages(conversation, usize::MAX).into_iter().filter(|m| m.pinned_by.is_some() && !m.deleted).collect();
+        pinned.reverse();
+        pinned
+    }
+
+    /// Transfère un message (texte et pièces jointes disponibles) vers une autre conversation.
+    pub fn forward_chat(&self, from: &str, message: &str, to: &str) -> Result<()> {
+        let original = self
+            .messages(from, usize::MAX)
+            .into_iter()
+            .find(|m| m.id == message && !m.system && !m.deleted)
+            .ok_or_else(|| anyhow!("message introuvable"))?;
+        let files: Vec<PathBuf> = original.attachments.iter().filter_map(|a| a.path.clone()).collect();
+        if original.text.trim().is_empty() && files.is_empty() {
+            bail!("ce message n'a rien à transférer (pièces jointes pas encore reçues)");
+        }
+        // Nom public (pseudo, sinon nom de l'appareil) : jamais un surnom donné ici.
+        let author = match &original.forwarded {
+            Some(name) => name.clone(),
+            None => self.inner.public_name(&original.author_id),
+        };
+        self.send_chat_with_kind(to, &original.text, None, &files, None, Some(author))
     }
 
     /// Nombre total de messages non lus (pour la barre latérale).
@@ -1455,7 +1567,7 @@ impl Engine {
     pub fn send_sticker(&self, conversation: &str, sticker: &str) -> Result<()> {
         let found = self.stickers().into_iter().find(|s| s.id == sticker).ok_or_else(|| anyhow!("autocollant introuvable"))?;
         let kind = if found.animated { AttachmentKind::Gif } else { AttachmentKind::Sticker };
-        self.send_chat_with_kind(conversation, "", None, &[found.path], Some(kind))
+        self.send_chat_with_kind(conversation, "", None, &[found.path], Some(kind), None)
     }
 }
 
@@ -1479,7 +1591,7 @@ mod tests {
                 seq,
                 lamport,
                 sent_ms: 0,
-                kind: ChatKind::Post { id: id.into(), text: id.into(), reply_to: None, attachments: vec![] },
+                kind: ChatKind::Post { id: id.into(), text: id.into(), reply_to: None, attachments: vec![], forwarded: None },
             },
             note: None,
         };
@@ -1495,7 +1607,7 @@ mod tests {
     fn only_the_author_can_edit_or_delete() {
         let mut messages = Vec::new();
         let stored = |author: &str, kind: ChatKind| Stored { author: author.into(), event: ChatEvent { seq: 1, lamport: 1, sent_ms: 0, kind }, note: None };
-        apply_to_messages(&mut messages, &stored("a", ChatKind::Post { id: "m".into(), text: "original".into(), reply_to: None, attachments: vec![] }));
+        apply_to_messages(&mut messages, &stored("a", ChatKind::Post { id: "m".into(), text: "original".into(), reply_to: None, attachments: vec![], forwarded: None }));
         apply_to_messages(&mut messages, &stored("b", ChatKind::Edit { target: "m".into(), text: "piraté".into() }));
         apply_to_messages(&mut messages, &stored("b", ChatKind::Delete { target: "m".into() }));
         assert_eq!(messages[0].text, "original");

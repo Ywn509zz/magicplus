@@ -13,6 +13,9 @@ pub fn default_data_dir() -> PathBuf {
 pub struct StoredIdentity {
     pub id: String,
     pub name: String,
+    /// Pseudo montré à tous (vide : le nom de l'appareil).
+    #[serde(default)]
+    pub pseudo: String,
     pub platform: String,
     pub public_key: String,
     pub secret_key: String,
@@ -42,6 +45,8 @@ pub struct Settings {
     pub manual_addresses: Vec<String>,
     /// Chercher seul les nouvelles versions sur GitHub (seul usage d'Internet).
     pub auto_update: bool,
+    /// Surnoms donnés aux autres appareils, visibles seulement ici (id → surnom).
+    pub aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -53,6 +58,7 @@ impl Default for Settings {
             dark_mode: None,
             manual_addresses: Vec::new(),
             auto_update: true,
+            aliases: std::collections::BTreeMap::new(),
         }
     }
 }

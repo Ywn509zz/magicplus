@@ -536,7 +536,8 @@ impl CanvasStore {
 
 impl Inner {
     fn my_name(&self) -> String {
-        self.identity.read().unwrap_or_else(|p| p.into_inner()).name.clone()
+        let identity = self.identity.read().unwrap_or_else(|p| p.into_inner());
+        if identity.pseudo.is_empty() { identity.name.clone() } else { identity.pseudo.clone() }
     }
 
     /// Membres (hors nous) d'une conversation où l'on peut écrire.
@@ -627,7 +628,8 @@ impl Inner {
         space.known.insert(sender.id.clone(), their_state);
         space.last_full.insert(sender.id.clone(), Instant::now());
         if let Some(canvas) = canvas.filter(|id| valid_name(id) && changed) {
-            canvases.editing.entry((conversation.to_string(), canvas)).or_default().insert(sender.name.clone(), Instant::now());
+            let name = self.display_name(&sender.id).unwrap_or_else(|| sender.name.clone());
+            canvases.editing.entry((conversation.to_string(), canvas)).or_default().insert(name, Instant::now());
             changed = true;
         }
         if changed {

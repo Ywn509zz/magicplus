@@ -3,19 +3,23 @@
 
 import { Button, Switch, LineEdit, ComboBox, CheckBox, ProgressIndicator, ScrollView, TextEdit, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem } from "chat.slint";
+import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem } from "chat.slint";
 
 import { MarkdownStyle, BlockItem, TableRowItem, TableCellItem } from "markdown.slint";
 import { ProfileCard, ProfileItem } from "profile.slint";
 import { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult } from "canvas.slint";
 
-export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem }
+export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem }
 export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem }
 export { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult }
 
 export struct PeerItem {
     id: string,
+    // Nom affiché : notre surnom, sinon son pseudo, sinon le nom de l'appareil.
     name: string,
+    device-name: string,
+    alias: string,
+    pseudo: string,
     platform: string,
     address: string,
     fingerprint: string,
@@ -191,6 +195,7 @@ component PeerCard inherits Card {
     callback pair(PeerItem);
     callback forget(string);
     callback chat(string);
+    callback alias(PeerItem);
 
     HorizontalLayout {
         spacing: 14px;
@@ -212,7 +217,7 @@ component PeerCard inherits Card {
                 overflow: elide;
             }
             Text {
-                text: root.peer.platform + (root.peer.address != "" ? "  ·  " + root.peer.address : "");
+                text: (root.peer.device-name != root.peer.name ? root.peer.device-name + "  ·  " : "") + root.peer.platform + (root.peer.address != "" ? "  ·  " + root.peer.address : "") + (root.peer.alias != "" && root.peer.pseudo != "" ? "  ·  pseudo « " + root.peer.pseudo + " »" : "");
                 color: Theme.subtle;
                 font-size: 12px;
                 overflow: elide;
@@ -239,6 +244,12 @@ component PeerCard inherits Card {
             alignment: center;
             if root.peer.trusted: HorizontalLayout {
                 spacing: 8px;
+                Button {
+                    text: "Surnom…";
+                    clicked => {
+                        root.alias(root.peer);
+                    }
+                }
                 Button {
                     text: "Discuter";
                     clicked => {
@@ -371,6 +382,11 @@ export component AppWindow inherits Window {
     in-out property <int> page: 0;
     in-out property <string> local-text;
     in-out property <string> name-edit;
+    in-out property <string> pseudo-edit;
+    // Surnom d'un appareil (fenêtre « Surnom… »).
+    in-out property <bool> alias-open;
+    in-out property <PeerItem> alias-peer;
+    in-out property <string> alias-edit;
     in-out property <string> address-edit;
     in-out property <int> resume-index: 4;
     in-out property <bool> auto-copy: true;
@@ -397,6 +413,8 @@ export component AppWindow inherits Window {
     callback add-address(string);
     callback remove-address(string);
     callback chat-with(string);
+    callback save-pseudo(string);
+    callback set-alias(string, string);
     callback update-auto-changed(bool);
     callback update-check();
     callback update-act();
@@ -624,6 +642,11 @@ export component AppWindow inherits Window {
                                 }
                                 chat(id) => {
                                     root.chat-with(id);
+                                }
+                                alias(p) => {
+                                    root.alias-peer = p;
+                                    root.alias-edit = p.alias;
+                                    root.alias-open = true;
                                 }
                             }
 
@@ -1088,8 +1111,40 @@ export component AppWindow inherits Window {
                                 SectionTitle {
                                     text: "Cet appareil";
                                 }
+                                Text {
+                                    text: "Pseudo";
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                }
                                 Subtle {
-                                    text: "Le nom affiché sur les autres appareils.";
+                                    text: "Votre nom pour les autres : ils le voient dès qu'ils détectent cet appareil, avant même l'association.";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        text <=> root.pseudo-edit;
+                                        placeholder-text: "ex. Léa";
+                                        horizontal-stretch: 1;
+                                        accepted(value) => {
+                                            root.save-pseudo(value);
+                                        }
+                                    }
+                                    Button {
+                                        text: "Enregistrer";
+                                        clicked => {
+                                            root.save-pseudo(root.pseudo-edit);
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "Nom de l'appareil";
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                }
+                                Subtle {
+                                    text: "Le nom de cet ordinateur, affiché à côté du pseudo.";
                                 }
                                 HorizontalLayout {
                                     spacing: 8px;
@@ -1324,6 +1379,55 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.pairing-open = false;
                         root.trust(root.pairing-peer.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ surnom d'un appareil
+    if root.alias-open: Rectangle {
+        background: #00000099;
+        TouchArea { }
+        Card {
+            width: min(440px, parent.width - 48px);
+            height: self.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.dark ? #2d2d2d : #ffffff;
+            Text {
+                text: "Surnom pour « " + root.alias-peer.device-name + " »";
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            Subtle {
+                text: "Visible seulement sur cet appareil. " + (root.alias-peer.pseudo != "" ? "Son pseudo : « " + root.alias-peer.pseudo + " ». " : "") + "Laissez vide pour revenir à son nom.";
+            }
+            LineEdit {
+                text <=> root.alias-edit;
+                placeholder-text: "Surnom";
+                accepted(value) => {
+                    root.alias-open = false;
+                    root.set-alias(root.alias-peer.id, value);
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Annuler";
+                    clicked => {
+                        root.alias-open = false;
+                    }
+                }
+                Button {
+                    text: "Enregistrer";
+                    primary: true;
+                    clicked => {
+                        root.alias-open = false;
+                        root.set-alias(root.alias-peer.id, root.alias-edit);
                     }
                 }
             }

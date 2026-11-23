@@ -218,6 +218,9 @@ fn sha_b64(bytes: &[u8]) -> String {
 impl Inner {
     /// Nom affiché d'un contact : appareil associé, membre d'un groupe ou appareil détecté.
     pub(crate) fn contact_name(&self, id: &str) -> Option<String> {
+        if let Some(name) = self.display_name(id) {
+            return Some(name);
+        }
         if let Some(peer) = lock(&self.trusted).get(id) {
             return Some(peer.name.clone());
         }
@@ -367,7 +370,7 @@ impl Engine {
 
     pub fn my_profile(&self) -> ProfileView {
         let identity = self.inner.identity.read().unwrap_or_else(|p| p.into_inner());
-        let (id, name) = (identity.id.clone(), identity.name.clone());
+        let (id, name) = (identity.id.clone(), if identity.pseudo.is_empty() { identity.name.clone() } else { identity.pseudo.clone() });
         drop(identity);
         lock(&self.inner.profiles).view(&id, name, true)
     }

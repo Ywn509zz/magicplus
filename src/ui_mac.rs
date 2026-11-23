@@ -12,6 +12,8 @@ mod markdown_view;
 mod profile_page;
 #[path = "ui_mac_canvas.rs"]
 mod canvas_page;
+#[path = "ui_mac_menus.rs"]
+mod menus;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -268,6 +270,7 @@ struct Widgets {
     received_header: Retained<NSTextField>,
     received_list: Retained<NSStackView>,
     name_field: Retained<NSTextField>,
+    pseudo_field: Retained<NSTextField>,
     folder_label: Retained<NSTextField>,
     clear_folder: Retained<NSButton>,
     resume_popup: Retained<NSPopUpButton>,
@@ -319,6 +322,9 @@ struct Ivars {
     profile_revision: Cell<u64>,
     canvas: RefCell<canvas_page::CanvasUi>,
     canvas_widgets: OnceCell<canvas_page::CanvasWidgets>,
+    /// Menu stylisé ouvert et les actions de ses boutons.
+    popover: RefCell<Option<Retained<objc2_app_kit::NSPopover>>>,
+    popover_actions: RefCell<Vec<menus::Action>>,
 }
 
 define_class!(
@@ -350,6 +356,23 @@ define_class!(
         #[unsafe(method(chatOpenDirect:))]
         fn chat_open_direct_action(&self, sender: &AnyObject) {
             self.chat_open_direct(tag_of(sender));
+        }
+
+        // ---- menus stylisés (ui_mac_menus.rs)
+
+        #[unsafe(method(popoverAction:))]
+        fn popover_action_clicked(&self, sender: &AnyObject) {
+            self.popover_action(tag_of(sender));
+        }
+
+        #[unsafe(method(chatRowRightClick:))]
+        fn chat_row_right_click_action(&self, recognizer: &NSClickGestureRecognizer) {
+            self.chat_row_right_click(recognizer);
+        }
+
+        #[unsafe(method(chatPins:))]
+        fn chat_pins_action(&self, sender: &NSButton) {
+            self.chat_pins(sender);
         }
 
         // ---- canevas (logique dans ui_mac_canvas.rs)
@@ -709,6 +732,40 @@ define_class!(
             self.refresh_if_needed();
         }
 
+        #[unsafe(method(savePseudo:))]
+        fn save_pseudo(&self, _sender: &AnyObject) {
+            let pseudo = self.widgets().pseudo_field.stringValue().to_string();
+            if let Err(error) = self.engine().set_pseudo(&pseudo) {
+                self.engine().set_status(error.to_string());
+            }
+            self.refresh_if_needed();
+        }
+
+        #[unsafe(method(peerAlias:))]
+        fn peer_alias(&self, sender: &AnyObject) {
+            let peer = self.ivars().peer_ids.borrow().get(tag_of(sender).max(0) as usize).cloned();
+            let Some(peer) = peer else { return };
+            let current = self.engine().snapshot().peers.into_iter().find(|p| p.id == peer);
+            let Some(current) = current else { return };
+            let alert = NSAlert::new(self.mtm());
+            alert.setMessageText(&ns(&format!("Surnom pour « {} »", current.device_name)));
+            alert.setInformativeText(&ns(&format!(
+                "Visible seulement sur cet appareil. {}Laissez vide pour revenir à son nom.",
+                if current.pseudo.is_empty() { String::new() } else { format!("Son pseudo : « {} ». ", current.pseudo) }
+            )));
+            let field = NSTextField::textFieldWithString(&ns(&current.alias), self.mtm());
+            field.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(280.0, 24.0)));
+            alert.setAccessoryView(Some(&field));
+            alert.addButtonWithTitle(&ns("Enregistrer"));
+            alert.addButtonWithTitle(&ns("Annuler"));
+            if alert.runModal() == NSAlertFirstButtonReturn {
+                if let Err(error) = self.engine().set_alias(&peer, &field.stringValue().to_string()) {
+                    self.engine().set_status(error.to_string());
+                }
+            }
+            self.refresh_if_needed();
+        }
+
         #[unsafe(method(saveName:))]
         fn save_name(&self, _sender: &AnyObject) {
             let name = self.widgets().name_field.stringValue().to_string();
@@ -926,7 +983,11 @@ impl Controller {
         widgets.paired.setStringValue(&ns(&format!("{paired} appareil(s) associé(s)")));
         widgets
             .me_title
-            .setStringValue(&ns(&format!("{}  (cet appareil)", snapshot.identity.name)));
+            .setStringValue(&ns(&if snapshot.identity.pseudo.is_empty() {
+                format!("{}  (cet appareil)", snapshot.identity.name)
+            } else {
+                format!("{}  ·  {}  (cet appareil)", snapshot.identity.pseudo, snapshot.identity.name)
+            }));
         widgets.me_details.setStringValue(&ns(&format!(
             "{}  ·  Empreinte  {}",
             platform_label(&snapshot.identity.platform),
@@ -977,6 +1038,7 @@ impl Controller {
 
         if first {
             widgets.name_field.setStringValue(&ns(&snapshot.identity.name));
+            widgets.pseudo_field.setStringValue(&ns(&snapshot.identity.pseudo));
             let current = snapshot.settings.resume_hours;
             let index = RESUME_CHOICES.iter().position(|value| *value == current).unwrap_or_else(|| {
                 widgets.resume_popup.addItemWithTitle(&ns(&hours_label(current)));
@@ -1073,7 +1135,14 @@ impl Controller {
 
             let texts = stack(true, 2.0, mtm);
             texts.addArrangedSubview(&strong(&peer.name, 14.0, mtm));
-            let mut details = platform_label(&peer.platform);
+            let mut details = if peer.device_name != peer.name {
+                format!("{}  ·  {}", peer.device_name, platform_label(&peer.platform))
+            } else {
+                platform_label(&peer.platform)
+            };
+            if !peer.alias.is_empty() && !peer.pseudo.is_empty() {
+                details.push_str(&format!("  ·  pseudo « {} »", peer.pseudo));
+            }
             if !peer.address.is_empty() {
                 details.push_str(&format!("  ·  {}", peer.address));
             }
@@ -1109,6 +1178,10 @@ impl Controller {
             };
             action.setTag(index as isize);
             if peer.trusted && !peer.key_changed {
+                let alias = button("Surnom…", sel!(peerAlias:), self, mtm);
+                alias.setTag(index as isize);
+                alias.setToolTip(Some(&ns("Donner un surnom à cet appareil (visible seulement ici)")));
+                row.addView_inGravity(&alias, NSStackViewGravity::Trailing);
                 let talk = button("Discuter", sel!(chatWith:), self, mtm);
                 talk.setTag(index as isize);
                 row.addView_inGravity(&talk, NSStackViewGravity::Trailing);
@@ -1606,7 +1679,25 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
     profile_row.addArrangedSubview(&profile_form);
     profile_card_box.addArrangedSubview(&profile_row);
     let device_card = card_in(&content, Some("Cet appareil"), mtm);
-    device_card.addArrangedSubview(&secondary("Le nom affiché sur les autres appareils.", mtm));
+    device_card.addArrangedSubview(&label("Pseudo", mtm));
+    device_card.addArrangedSubview(&secondary(
+        "Votre nom pour les autres : ils le voient dès qu'ils détectent cet appareil, avant même l'association.",
+        mtm,
+    ));
+    let pseudo_field = NSTextField::textFieldWithString(&ns(""), mtm);
+    pseudo_field.setPlaceholderString(Some(&ns("ex. Léa")));
+    pseudo_field.setTranslatesAutoresizingMaskIntoConstraints(false);
+    pseudo_field.widthAnchor().constraintEqualToConstant(320.0).setActive(true);
+    unsafe {
+        pseudo_field.setTarget(Some(as_target(controller)));
+        pseudo_field.setAction(Some(sel!(savePseudo:)));
+    }
+    let pseudo_row = stack(false, 8.0, mtm);
+    pseudo_row.addArrangedSubview(&pseudo_field);
+    pseudo_row.addArrangedSubview(&button("Enregistrer", sel!(savePseudo:), controller, mtm));
+    device_card.addArrangedSubview(&pseudo_row);
+    device_card.addArrangedSubview(&label("Nom de l'appareil", mtm));
+    device_card.addArrangedSubview(&secondary("Le nom de cet ordinateur, affiché à côté du pseudo.", mtm));
     let name_field = NSTextField::textFieldWithString(&ns(""), mtm);
     name_field.setTranslatesAutoresizingMaskIntoConstraints(false);
     name_field.widthAnchor().constraintEqualToConstant(320.0).setActive(true);
@@ -1753,6 +1844,7 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         received_header,
         received_list,
         name_field,
+        pseudo_field,
         folder_label,
         clear_folder,
         resume_popup,

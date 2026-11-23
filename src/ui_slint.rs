@@ -26,6 +26,9 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
         .map(|peer| PeerItem {
             id: peer.id.clone().into(),
             name: peer.name.clone().into(),
+            device_name: peer.device_name.clone().into(),
+            alias: peer.alias.clone().into(),
+            pseudo: peer.pseudo.clone().into(),
             platform: platform_label(&peer.platform).into(),
             address: peer.address.clone().into(),
             fingerprint: peer.fingerprint.clone().into(),
@@ -133,6 +136,7 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
     }
     if first {
         ui.set_name_edit(snapshot.identity.name.clone().into());
+        ui.set_pseudo_edit(snapshot.identity.pseudo.clone().into());
         let index = RESUME_CHOICES.iter().position(|hours| *hours == snapshot.settings.resume_hours).unwrap_or(4);
         ui.set_resume_index(index as i32);
         ui.set_auto_copy(snapshot.settings.auto_copy_received);
@@ -359,6 +363,22 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let engine = engine.clone();
+        ui.on_save_pseudo(move |pseudo| {
+            if let Err(error) = engine.set_pseudo(&pseudo) {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_set_alias(move |peer, alias| {
+            if let Err(error) = engine.set_alias(&peer, &alias) {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
         ui.on_update_auto_changed(move |enabled| match engine.update_settings(|settings| settings.auto_update = enabled) {
             Ok(()) if enabled => engine.check_update_now(),
             Ok(()) => {}
@@ -462,6 +482,20 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
                 chat.select_index(1);
                 let data = ui.global::<ChatData>();
                 data.invoke_show_profile(data.get_peer_id());
+            })),
+            ("menu-message", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                let messages = data.get_messages();
+                let last = messages.row_count().saturating_sub(1);
+                if let Some(message) = messages.row_data(last) {
+                    data.set_actions_message(message);
+                    data.set_actions_index(last as i32);
+                    data.set_actions_x(560.0);
+                    data.set_actions_y(260.0);
+                    data.set_actions_request(data.get_actions_request() + 1);
+                }
             })),
             ("canevas", Box::new(|ui, chat| {
                 ui.set_page(chat::CHAT_PAGE);

@@ -196,6 +196,13 @@ cargo test
   cette clé est utilisée. Si l'appareil annonce une autre clé, il est marqué « Clé modifiée », plus
   rien ne lui est envoyé, et il faut le ré-associer explicitement.
 - L'association est à sens unique : chaque machine doit associer l'autre pour qu'elle accepte ses envois.
+- **Noms** : chaque appareil a un nom d'ordinateur (`identity.name`) et un **pseudo** facultatif
+  (`identity.pseudo`, 32 caractères), annoncé dans chaque `Hello` (`device.pseudo`) : les autres le
+  voient dès la détection, avant même l'association, et le gardent dans `pseudos.json`. Chacun peut
+  aussi donner un **surnom** local à un autre appareil (`Settings::aliases`, visible seulement chez
+  lui). Nom affiché partout (appareils, discussions, profils, canevas) : surnom, sinon pseudo, sinon
+  nom de l'ordinateur (`Engine::display_name`). Ce qui part vers les autres (message transféré) porte
+  le nom **public** (pseudo ou nom de l'ordinateur), jamais un surnom.
 
 ### Chiffrement (TCP, port 45455) — `src/secure.rs`
 
@@ -278,6 +285,17 @@ membre, par le même canal Noise que le reste.
 - **Messages réseau** (`src/protocol.rs`) : `chat-events` (lot d'événements d'un auteur),
   `chat-typing` (« écrit… », éphémère, au plus toutes les 3 s, affiché 6 s), `chat-read` (tout est lu
   jusqu'à cette horloge de Lamport : « Lu », « Lu par … »).
+- **Épingles** : événement `pin` {cible, épinglé ?}, par n'importe quel membre ; une ligne « X a
+  épinglé « … » » apparaît dans le fil, et le bouton punaise de l'en-tête liste les messages épinglés.
+- **Transfert** : « Transférer… » renvoie le texte et les pièces jointes disponibles dans une autre
+  conversation ; le `post` porte `forwarded` (nom public de l'auteur d'origine).
+- **Réactions** : n'importe quel émoji (grille de 48 ou saisie libre), 32 octets au plus.
+- **Compatibilité** : un type d'événement inconnu (version plus récente) est compté puis ignoré
+  (`ChatKind::Unknown`). Les versions d'avant la 0.9 ne connaissent pas `pin` : mettez tous les
+  appareils à jour.
+- **Menus** : menus d'actions dessinés par l'app (pas ceux du système) — Mac : `src/ui_mac_menus.rs`
+  (bulles `NSPopover` avec icônes, rangée de réactions, grilles d'émojis et d'autocollants) ;
+  Windows : `MenuRow`/`MenuPanel` et fenêtres surgissantes de `ui/chat.slint` (clic droit ou « ⋯ »).
 - **Pièces jointes** : un message `post` décrit ses pièces (`id`, nom, taille, type `image`, `gif`,
   `video`, `sticker` ou `file`) ; les octets partent comme un transfert de fichier ordinaire
   (reprenable, vérifié) dont l'offre porte `chat: {conversation, attachment}`. Le récepteur les range

@@ -124,7 +124,14 @@ pub struct TransferView {
 #[derive(Debug, Clone)]
 pub struct PeerView {
     pub id: String,
+    /// Nom à afficher : notre surnom, sinon son pseudo, sinon le nom de l'appareil.
     pub name: String,
+    /// Nom de l'appareil (ordinateur).
+    pub device_name: String,
+    /// Surnom donné ici (vide sinon).
+    pub alias: String,
+    /// Pseudo choisi par son utilisateur (vide sinon).
+    pub pseudo: String,
     pub platform: String,
     pub address: String,
     pub fingerprint: String,
@@ -156,6 +163,8 @@ pub struct ClipboardView {
 pub struct IdentityView {
     pub id: String,
     pub name: String,
+    /// Pseudo montré à tous (vide : le nom de l'appareil).
+    pub pseudo: String,
     pub platform: String,
     pub fingerprint: String,
 }
@@ -278,12 +287,19 @@ pub(crate) struct Inner {
     pub profiles: Mutex<crate::profile::ProfileStore>,
     /// Canevas partagés (documents Yjs par conversation).
     pub canvases: Mutex<crate::canvas::CanvasStore>,
+    /// Pseudos des autres appareils, appris par leurs annonces (id → pseudo).
+    pub pseudos: Mutex<HashMap<String, String>>,
     /// Tests : la coupure simulée n'a lieu qu'une fois.
     pub test_cut_done: AtomicBool,
     /// Discussions (conversations, journal d'événements, synchronisation).
     pub chat: Mutex<ChatStore>,
     pub dirty: AtomicBool,
     pub shutdown: AtomicBool,
+}
+
+/// Pseudo ou surnom propre : sans caractère de contrôle, 32 caractères au plus.
+pub(crate) fn clean_pseudo(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(32).collect::<String>().trim().to_string()
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -306,6 +322,7 @@ impl Engine {
                 let identity = StoredIdentity {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: default_device_name(),
+                    pseudo: String::new(),
                     platform: platform_name().to_string(),
                     public_key: crypto::public_to_b64(&secret.public_key()),
                     secret_key: crypto::encode_key(&secret.to_bytes()),
@@ -318,6 +335,7 @@ impl Engine {
         let chat = ChatStore::load(store.dir().join("discussions"), &identity.id);
         let profiles = crate::profile::ProfileStore::load(store.dir());
         let canvases = crate::canvas::CanvasStore::load(store.dir());
+        let pseudos: HashMap<String, String> = store.load("pseudos.json").unwrap_or_default();
 
         let trusted: HashMap<String, TrustedPeer> = store
             .load::<Vec<TrustedPeer>>("trusted.json")
@@ -351,6 +369,7 @@ impl Engine {
                 update: Mutex::default(),
                 profiles: Mutex::new(profiles),
                 canvases: Mutex::new(canvases),
+                pseudos: Mutex::new(pseudos),
                 test_cut_done: AtomicBool::new(false),
                 chat: Mutex::new(chat),
                 dirty: AtomicBool::new(true),
@@ -393,6 +412,7 @@ impl Engine {
             IdentityView {
                 id: identity.id.clone(),
                 name: identity.name.clone(),
+                pseudo: identity.pseudo.clone(),
                 platform: identity.platform.clone(),
                 fingerprint: crypto::fingerprint(&identity.public_key),
             }
@@ -400,6 +420,14 @@ impl Engine {
 
         let trusted = lock(&inner.trusted).clone();
         let refused = lock(&inner.refused).clone();
+        let aliases = lock(&inner.settings).aliases.clone();
+        let pseudos = lock(&inner.pseudos).clone();
+        let naming = |id: &str, device: &str| {
+            let alias = aliases.get(id).cloned().unwrap_or_default();
+            let pseudo = pseudos.get(id).cloned().unwrap_or_default();
+            let name = if !alias.is_empty() { alias.clone() } else if !pseudo.is_empty() { pseudo.clone() } else { device.to_string() };
+            (name, alias, pseudo)
+        };
         let wants_pairing = |id: &str| refused.get(id).is_some_and(|at| at.elapsed() < PAIRING_REQUEST_WINDOW);
         let mut peers: Vec<PeerView> = Vec::new();
         {
@@ -407,9 +435,13 @@ impl Engine {
             for (id, peer) in discovered.iter() {
                 let trusted_entry = trusted.get(id);
                 let same_key = trusted_entry.is_some_and(|entry| entry.public_key == peer.device.public_key);
+                let (name, alias, pseudo) = naming(id, &peer.device.name);
                 peers.push(PeerView {
                     id: id.clone(),
-                    name: peer.device.name.clone(),
+                    name,
+                    device_name: peer.device.name.clone(),
+                    alias,
+                    pseudo,
                     platform: peer.device.platform.clone(),
                     address: format!("{}:{}", peer.ip, peer.tcp_port),
                     fingerprint: peer.fingerprint.clone(),
@@ -421,9 +453,13 @@ impl Engine {
             }
             for (id, entry) in trusted.iter() {
                 if !discovered.contains_key(id) {
+                    let (name, alias, pseudo) = naming(id, &entry.name);
                     peers.push(PeerView {
                         id: id.clone(),
-                        name: entry.name.clone(),
+                        name,
+                        device_name: entry.name.clone(),
+                        alias,
+                        pseudo,
                         platform: entry.platform.clone(),
                         address: String::new(),
                         fingerprint: crypto::fingerprint(&entry.public_key),
@@ -564,6 +600,42 @@ impl Engine {
 
     // ---------------------------------------------------------------- réglages
 
+    /// Pseudo montré à tous les appareils (dès la détection, avant même l'association).
+    pub fn set_pseudo(&self, pseudo: &str) -> Result<()> {
+        let pseudo = clean_pseudo(pseudo);
+        let mut identity = self.inner.identity.write().unwrap_or_else(|p| p.into_inner());
+        identity.pseudo = pseudo.clone();
+        self.inner.store.save("identity.json", &*identity)?;
+        drop(identity);
+        self.inner.chat_changed();
+        self.inner.set_status(if pseudo.is_empty() {
+            "Pseudo retiré : les autres voient le nom de l'appareil".to_string()
+        } else {
+            format!("Pseudo « {pseudo} » enregistré : les autres appareils le voient maintenant")
+        });
+        Ok(())
+    }
+
+    /// Surnom d'un autre appareil, visible seulement ici (vide : on l'enlève).
+    pub fn set_alias(&self, peer_id: &str, alias: &str) -> Result<()> {
+        let alias = clean_pseudo(alias);
+        self.update_settings(|settings| {
+            if alias.is_empty() {
+                settings.aliases.remove(peer_id);
+            } else {
+                settings.aliases.insert(peer_id.to_string(), alias.clone());
+            }
+        })?;
+        self.inner.chat_changed();
+        self.inner.touch();
+        Ok(())
+    }
+
+    /// Nom affiché d'un appareil : surnom, sinon pseudo, sinon `None`.
+    pub fn display_name(&self, id: &str) -> Option<String> {
+        self.inner.display_name(id)
+    }
+
     pub fn set_device_name(&self, name: &str) -> Result<()> {
         let name = name.trim();
         if name.is_empty() {
@@ -693,6 +765,50 @@ impl Engine {
 }
 
 impl Inner {
+    /// Surnom donné ici, sinon pseudo de l'appareil (le nôtre compris).
+    pub(crate) fn display_name(&self, id: &str) -> Option<String> {
+        if let Some(alias) = lock(&self.settings).aliases.get(id).filter(|a| !a.is_empty()) {
+            return Some(alias.clone());
+        }
+        if id == self.own_id() {
+            let pseudo = self.identity.read().unwrap_or_else(|p| p.into_inner()).pseudo.clone();
+            return (!pseudo.is_empty()).then_some(pseudo);
+        }
+        lock(&self.pseudos).get(id).filter(|p| !p.is_empty()).cloned()
+    }
+
+    /// Nom public d'un appareil : son pseudo, sinon le nom de l'appareil (jamais nos surnoms).
+    pub(crate) fn public_name(&self, id: &str) -> String {
+        let identity = self.identity.read().unwrap_or_else(|p| p.into_inner());
+        if id == identity.id {
+            return if identity.pseudo.is_empty() { identity.name.clone() } else { identity.pseudo.clone() };
+        }
+        drop(identity);
+        if let Some(pseudo) = lock(&self.pseudos).get(id).filter(|p| !p.is_empty()) {
+            return pseudo.clone();
+        }
+        lock(&self.trusted)
+            .get(id)
+            .map(|p| p.name.clone())
+            .or_else(|| lock(&self.chat).member_name(id))
+            .or_else(|| lock(&self.peers).get(id).map(|p| p.device.name.clone()))
+            .unwrap_or_else(|| "Quelqu'un".to_string())
+    }
+
+    /// Tous les noms affichés connus (id → surnom ou pseudo).
+    pub(crate) fn display_names(&self) -> HashMap<String, String> {
+        let mut names: HashMap<String, String> = lock(&self.pseudos).clone();
+        let own = self.identity.read().unwrap_or_else(|p| p.into_inner());
+        if !own.pseudo.is_empty() {
+            names.insert(own.id.clone(), own.pseudo.clone());
+        }
+        drop(own);
+        for (id, alias) in lock(&self.settings).aliases.iter().filter(|(_, a)| !a.is_empty()) {
+            names.insert(id.clone(), alias.clone());
+        }
+        names
+    }
+
     pub(crate) fn touch(&self) {
         self.dirty.store(true, Ordering::SeqCst);
     }
@@ -724,6 +840,7 @@ impl Inner {
                 name: identity.name.clone(),
                 platform: identity.platform.clone(),
                 public_key: identity.public_key.clone(),
+                pseudo: identity.pseudo.clone(),
             },
             tcp_port: self.cfg.transfer_port,
             discovery_port: self.cfg.discovery_port,
@@ -797,6 +914,28 @@ impl Inner {
         let name = device.name.clone();
         let id = device.id.clone();
         let hello_id = id.clone();
+
+        // Pseudo annoncé : retenu (et gardé sur le disque pour quand l'appareil est hors ligne).
+        let pseudo = clean_pseudo(&device.pseudo);
+        let changed = {
+            let mut pseudos = lock(&self.pseudos);
+            let known = pseudos.get(&id).cloned().unwrap_or_default();
+            if known != pseudo {
+                if pseudo.is_empty() {
+                    pseudos.remove(&id);
+                } else {
+                    pseudos.insert(id.clone(), pseudo.clone());
+                }
+                let _ = self.store.save("pseudos.json", &*pseudos);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.chat_changed();
+            self.touch();
+        }
 
         let mut peers = lock(&self.peers);
         let announce = peers.get(&id).is_none_or(|known| known.last_seen.elapsed() > ONLINE_WINDOW);

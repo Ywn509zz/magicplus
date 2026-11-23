@@ -405,6 +405,62 @@ fn group_canvas_real_time_and_history() {
     }
 }
 
+/// Pseudo public, surnom local, épingles, transfert et réaction avec n'importe quel émoji.
+#[test]
+fn pseudo_alias_pins_forward_and_any_reaction() {
+    let nodes = start_nodes("pseudo", 3);
+    let (a, b, c) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine);
+    trust(a, b);
+    trust(b, a);
+    trust(a, c);
+    trust(c, a);
+
+    // Pseudo : vu par les autres dès l'annonce, même sans association.
+    a.set_pseudo("Léa").unwrap();
+    wait_for("B voit le pseudo de A", Duration::from_secs(10), || {
+        b.snapshot().peers.iter().any(|p| p.id == id_of(a) && p.name == "Léa" && p.device_name == "Machine A")
+    });
+    // Surnom local : seulement chez B.
+    b.set_alias(&id_of(a), "Maman").unwrap();
+    let peer = b.snapshot().peers.into_iter().find(|p| p.id == id_of(a)).unwrap();
+    assert_eq!((peer.name.as_str(), peer.alias.as_str(), peer.pseudo.as_str()), ("Maman", "Maman", "Léa"));
+    assert!(c.snapshot().peers.iter().all(|p| p.name != "Maman"));
+
+    let direct = a.open_direct(&id_of(b)).unwrap();
+    a.send_chat(&direct, "Rendez-vous **samedi**", None, &[]).unwrap();
+    wait_for("B reçoit", Duration::from_secs(10), || has_conversation(b, &direct) && !b.messages(&direct, 10).is_empty());
+    let title = b.conversations().into_iter().find(|cv| cv.id == direct).unwrap().title;
+    assert_eq!(title, "Maman");
+    assert_eq!(b.messages(&direct, 10)[0].author_name, "Maman");
+    assert_eq!(b.profile(&id_of(a)).unwrap().name, "Maman");
+
+    // N'importe quel émoji en réaction.
+    let message = b.messages(&direct, 10)[0].id.clone();
+    b.toggle_reaction(&direct, &message, "🦀").unwrap();
+    wait_for("A voit 🦀", Duration::from_secs(10), || {
+        a.messages(&direct, 10).iter().any(|m| m.reactions.iter().any(|r| r.emoji == "🦀"))
+    });
+
+    // Épingler (par B), visible chez A avec une ligne « a épinglé », puis désépingler.
+    b.pin_chat(&direct, &message, true).unwrap();
+    wait_for("A voit le message épinglé", Duration::from_secs(10), || a.pinned_messages(&direct).len() == 1);
+    assert_eq!(a.pinned_messages(&direct)[0].pinned_by.as_deref(), Some("Machine B"));
+    assert!(a.messages(&direct, 10).iter().any(|m| m.system && m.text.contains("a épinglé") && m.text.contains("samedi")));
+    a.pin_chat(&direct, &message, false).unwrap();
+    wait_for("B voit le message désépinglé", Duration::from_secs(10), || b.pinned_messages(&direct).is_empty());
+
+    // Transfert vers un groupe : C voit le message et le nom public de son auteur (pas le surnom de B).
+    let group = a.create_group("Famille", &[id_of(b), id_of(c)]).unwrap();
+    wait_for("groupe", Duration::from_secs(10), || has_conversation(c, &group));
+    b.forward_chat(&direct, &message, &group).unwrap();
+    wait_for("C reçoit le message transféré", Duration::from_secs(10), || {
+        c.messages(&group, 20).iter().any(|m| m.text.contains("samedi") && m.forwarded.as_deref() == Some("Léa"))
+    });
+    for node in &nodes {
+        node.engine.shutdown();
+    }
+}
+
 /// Message de démonstration qui utilise tout le Markdown pris en charge.
 const DEMO_MARKDOWN: &str = "## Programme du voyage
 -# mis à jour ce matin
