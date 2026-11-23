@@ -225,6 +225,23 @@ pub fn can_self_install() -> bool {
     }
 }
 
+/// Variables d'essai à ne pas transmettre à la version relancée (sinon elle se remettrait à jour
+/// en boucle : `open` transmet l'environnement à l'app qu'il lance).
+const TEST_VARIABLES: [&str; 2] = ["MAGICPLUS_UPDATE_TEST", "MAGICPLUS_FAKE_VERSION"];
+
+fn relaunch(mut command: Command) -> Result<()> {
+    for variable in TEST_VARIABLES {
+        command.env_remove(variable);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("impossible de lancer la nouvelle version")?;
+    Ok(())
+}
+
 fn old_windows_exe(exe: &Path) -> PathBuf {
     exe.with_extension("old.exe")
 }
@@ -275,8 +292,7 @@ fn install(staged: &Path) -> Result<()> {
                 return Err(anyhow!("impossible d'installer la nouvelle version : {error}"));
             }
         }
-        Command::new(&exe).spawn().context("impossible de lancer la nouvelle version")?;
-        return Ok(());
+        return relaunch(Command::new(&exe));
     }
     if cfg!(target_os = "macos") {
         let bundle = running_bundle().ok_or_else(|| anyhow!("MagicPlus n'a pas été lancé depuis MagicPlus.app"))?;
@@ -298,16 +314,9 @@ fn install(staged: &Path) -> Result<()> {
             bail!("impossible d'installer la nouvelle version");
         }
         // Relance une fois que cette instance a quitté.
-        Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 1; /usr/bin/open -n \"$0\"")
-            .arg(&bundle)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("impossible de relancer MagicPlus")?;
-        return Ok(());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("sleep 1; /usr/bin/open -n \"$0\"").arg(&bundle);
+        return relaunch(command);
     }
     bail!("mise à jour automatique indisponible sur ce système")
 }
