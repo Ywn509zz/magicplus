@@ -306,7 +306,7 @@ membre, par le même canal Noise que le reste.
 
 - **Publier** : une étiquette `vX.Y.Z` (annotée : son message devient les notes de version, affichées
   dans l'app) envoyée sur GitHub déclenche `versions.yml` : `MagicPlus-windows-x64.exe`
-  (`windows-latest`), `MagicPlus-macos.zip` (`macos-14`, exécutable universel Intel + Apple Silicon
+  (`windows-latest`), `MagicPlus-macos.zip` (`macos-latest`, exécutable universel Intel + Apple Silicon
   via `MAGICPLUS_UNIVERSAL=1 packaging/macos/build-app.sh`, macOS 11 minimum) et `SHA256SUMS.txt`.
   `verification.yml` lance clippy (Windows, macOS) et les tests (macOS) à chaque envoi sur `main`.
 - **Chercher** : au démarrage (après 15 s) puis toutes les 6 h si `Settings::auto_update` (vrai par

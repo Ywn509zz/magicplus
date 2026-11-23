@@ -16,7 +16,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
