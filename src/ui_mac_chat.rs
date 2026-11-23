@@ -78,7 +78,7 @@ define_class!(
     }
 );
 
-fn bubble(style: u8, top: f64, side: f64, mtm: MainThreadMarker) -> (Retained<BubbleView>, Retained<NSStackView>) {
+pub(super) fn bubble(style: u8, top: f64, side: f64, mtm: MainThreadMarker) -> (Retained<BubbleView>, Retained<NSStackView>) {
     let ivars = ShapeIvars::default();
     ivars.style.set(style);
     let view: Retained<BubbleView> = unsafe { msg_send![super(BubbleView::alloc(mtm).set_ivars(ivars)), init] };
@@ -159,10 +159,17 @@ pub(super) struct ChatUi {
     current_conversation: Option<ConversationView>,
 }
 
+impl ChatUi {
+    /// Conversation affichée.
+    pub(super) fn current_id(&self) -> Option<String> {
+        self.current.clone()
+    }
+}
+
 // ------------------------------------------------------------------ construction de la page
 
 /// Liste défilante dont le contenu part du haut.
-fn scrolling_stack(spacing: f64, top: f64, side: f64, mtm: MainThreadMarker) -> (Retained<NSScrollView>, Retained<FlippedView>, Retained<NSStackView>) {
+pub(super) fn scrolling_stack(spacing: f64, top: f64, side: f64, mtm: MainThreadMarker) -> (Retained<NSScrollView>, Retained<FlippedView>, Retained<NSStackView>) {
     let scroll = NSScrollView::new(mtm);
     scroll.setHasVerticalScroller(true);
     scroll.setAutohidesScrollers(true);
@@ -266,6 +273,8 @@ pub(super) fn build(controller: &Controller, mtm: MainThreadMarker) -> (Retained
     header_texts.addArrangedSubview(&conversation_title);
     header_texts.addArrangedSubview(&subtitle);
     header.addArrangedSubview(&header_texts);
+    let canvas_button = icon_button("doc.richtext", "Canevas partagés : pages écrites ensemble", sel!(chatToggleCanvas:), controller, mtm);
+    header.addView_inGravity(&canvas_button, NSStackViewGravity::Trailing);
     let group_button = icon_button("ellipsis.circle", "Options du groupe", sel!(chatGroupMenu:), controller, mtm);
     header.addView_inGravity(&group_button, NSStackViewGravity::Trailing);
     panel.addSubview(&header);
@@ -344,6 +353,19 @@ pub(super) fn build(controller: &Controller, mtm: MainThreadMarker) -> (Retained
         &secondary("Entrée pour envoyer, Maj+Entrée pour aller à la ligne. **gras**, *italique*, `code`, ~~barré~~.", mtm),
     );
 
+    // Canevas : à la place des messages et de la zone de saisie quand ils sont ouverts.
+    let canvas_root = super::canvas_page::build(
+        controller,
+        canvas_button.clone(),
+        vec![Retained::into_super(scroll.clone()), bottom_box.clone()],
+        mtm,
+    );
+    panel.addSubview(&canvas_root);
+    canvas_root.topAnchor().constraintEqualToAnchor(&header_line.bottomAnchor()).setActive(true);
+    canvas_root.leadingAnchor().constraintEqualToAnchor(&panel.leadingAnchor()).setActive(true);
+    canvas_root.trailingAnchor().constraintEqualToAnchor(&panel.trailingAnchor()).setActive(true);
+    canvas_root.bottomAnchor().constraintEqualToAnchor(&panel.bottomAnchor()).setActive(true);
+
     let empty = label("Choisissez une discussion à gauche, ou créez-en une avec le crayon.", mtm);
     empty.setTextColor(Some(&NSColor::secondaryLabelColor()));
     empty.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -397,6 +419,7 @@ impl Controller {
 
     /// Appelé toutes les 150 ms : ne redessine que si les discussions ont changé.
     pub(super) fn chat_tick(&self) {
+        self.canvas_tick();
         let revision = self.engine().chat_revision();
         let (seen, progress, last) = {
             let ui = self.ivars().chat.borrow();
@@ -457,6 +480,7 @@ impl Controller {
         for view in &widgets.content {
             view.setHidden(false);
         }
+        self.canvas_apply_visibility();
 
         widgets.title.setStringValue(&ns(&conversation.title));
         let others: Vec<&magicplus_core::MemberView> = conversation.members.iter().filter(|m| !m.me).collect();

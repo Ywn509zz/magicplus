@@ -10,6 +10,8 @@ mod chat_page;
 mod markdown_view;
 #[path = "ui_mac_profile.rs"]
 mod profile_page;
+#[path = "ui_mac_canvas.rs"]
+mod canvas_page;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -315,6 +317,8 @@ struct Ivars {
     profile_popover: RefCell<Option<(Retained<objc2_app_kit::NSPopover>, String)>>,
     /// Version des profils déjà affichée dans les réglages.
     profile_revision: Cell<u64>,
+    canvas: RefCell<canvas_page::CanvasUi>,
+    canvas_widgets: OnceCell<canvas_page::CanvasWidgets>,
 }
 
 define_class!(
@@ -346,6 +350,63 @@ define_class!(
         #[unsafe(method(chatOpenDirect:))]
         fn chat_open_direct_action(&self, sender: &AnyObject) {
             self.chat_open_direct(tag_of(sender));
+        }
+
+        // ---- canevas (logique dans ui_mac_canvas.rs)
+
+        #[unsafe(method(chatToggleCanvas:))]
+        fn chat_toggle_canvas(&self, _sender: &AnyObject) {
+            self.canvas_toggle();
+        }
+
+        #[unsafe(method(canvasNew:))]
+        fn canvas_new_action(&self, _sender: &AnyObject) {
+            self.canvas_new();
+        }
+
+        #[unsafe(method(canvasSelect:))]
+        fn canvas_select_action(&self, sender: &AnyObject) {
+            self.canvas_select(tag_of(sender));
+        }
+
+        #[unsafe(method(canvasRename:))]
+        fn canvas_rename_action(&self, _sender: &AnyObject) {
+            self.canvas_rename();
+        }
+
+        #[unsafe(method(canvasDelete:))]
+        fn canvas_delete_action(&self, _sender: &AnyObject) {
+            self.canvas_delete();
+        }
+
+        #[unsafe(method(canvasFormat:))]
+        fn canvas_format_action(&self, sender: &AnyObject) {
+            self.canvas_format_index(tag_of(sender));
+        }
+
+        #[unsafe(method(canvasColor:))]
+        fn canvas_color_action(&self, sender: &NSPopUpButton) {
+            self.canvas_color(sender);
+        }
+
+        #[unsafe(method(canvasHistory:))]
+        fn canvas_history_action(&self, _sender: &AnyObject) {
+            self.canvas_history_toggle();
+        }
+
+        #[unsafe(method(canvasVersionSelect:))]
+        fn canvas_version_select_action(&self, sender: &AnyObject) {
+            self.canvas_version_select(tag_of(sender));
+        }
+
+        #[unsafe(method(canvasRestore:))]
+        fn canvas_restore_action(&self, _sender: &AnyObject) {
+            self.canvas_restore();
+        }
+
+        #[unsafe(method(canvasNameVersion:))]
+        fn canvas_name_version_action(&self, _sender: &AnyObject) {
+            self.canvas_name_version();
         }
 
         // ---- profils (logique dans ui_mac_profile.rs)
@@ -744,8 +805,11 @@ define_class!(
 
     unsafe impl NSTextDelegate for Controller {
         #[unsafe(method(textDidChange:))]
-        fn text_did_change(&self, _notification: &NSNotification) {
-            self.chat_text_changed();
+        fn text_did_change(&self, notification: &NSNotification) {
+            let object = notification.object();
+            if !self.canvas_text_changed(object.as_deref()) {
+                self.chat_text_changed();
+            }
         }
     }
 
@@ -1765,6 +1829,14 @@ pub fn run(engine: Engine) {
     // Développement : ouvre la n-ième discussion (captures d'écran).
     if let Some(index) = std::env::var("MAGICPLUS_START_CHAT").ok().and_then(|v| v.parse::<isize>().ok()) {
         controller.chat_select(index);
+        // Développement : ouvre directement les canevas de cette conversation.
+        if let Ok(mode) = std::env::var("MAGICPLUS_START_CANVAS") {
+            controller.canvas_toggle();
+            if mode == "historique" {
+                controller.canvas_history_toggle();
+                controller.canvas_version_select(0);
+            }
+        }
     }
     controller.refresh(true);
     let _ = engine.take_dirty();

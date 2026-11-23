@@ -411,6 +411,12 @@ impl ChatStore {
         self.conversations.get(conversation)?.meta.members.iter().find(|m| m.id == id).cloned()
     }
 
+    /// Membres (hors nous) d'une conversation où l'on peut encore écrire.
+    pub(crate) fn writable_members(&self, conversation: &str) -> Option<Vec<String>> {
+        let state = self.conversations.get(conversation)?;
+        (!state.meta.closed).then(|| state.meta.members.iter().filter(|m| m.id != self.me).map(|m| m.id.clone()).collect())
+    }
+
     /// Nom d'un membre de l'une de nos conversations.
     pub(crate) fn member_name(&self, id: &str) -> Option<String> {
         self.conversations.values().flat_map(|c| c.meta.members.iter()).find(|m| m.id == id).map(|m| m.name.clone())

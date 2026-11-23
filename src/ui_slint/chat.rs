@@ -241,6 +241,11 @@ impl Chat {
         self.weak.upgrade()
     }
 
+    /// Conversation affichée (pour les canevas).
+    pub fn current_conversation(&self) -> Option<String> {
+        self.state.borrow().current.clone()
+    }
+
     fn current(&self) -> Option<String> {
         self.state.borrow().current.clone()
     }

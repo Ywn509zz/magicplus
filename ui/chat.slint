@@ -8,6 +8,7 @@ import { Button, LineEdit, CheckBox, ScrollView, TextEdit, ProgressIndicator } f
 import { Theme } from "theme.slint";
 import { MarkdownView, BlockItem } from "markdown.slint";
 import { Avatar, ProfileCard, ProfileItem } from "profile.slint";
+import { CanvasPane, CanvasData } from "canvas.slint";
 
 export struct ConversationItem {
     id: string,
@@ -1155,6 +1156,16 @@ component ConversationPane inherits Rectangle {
                             overflow: elide;
                         }
                     }
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            icon: CanvasData.open ? @image-url("icons/chat.svg") : @image-url("icons/canvas.svg");
+                            active: CanvasData.open;
+                            clicked => {
+                                CanvasData.toggle();
+                            }
+                        }
+                    }
                     if ChatData.is-group: VerticalLayout {
                         alignment: center;
                         IconButton {
@@ -1318,6 +1329,14 @@ component ConversationPane inherits Rectangle {
                 overflow: elide;
             }
         }
+    }
+
+    // Canevas : par-dessus les messages et la zone de saisie (sous l'en-tête).
+    if CanvasData.open: CanvasPane {
+        x: 0px;
+        y: 61px;
+        width: parent.width;
+        height: parent.height - 61px;
     }
 }
 

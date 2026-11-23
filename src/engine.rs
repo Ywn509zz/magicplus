@@ -240,6 +240,8 @@ pub(crate) enum Reply {
     None,
     /// Offre de fichier acceptée : nombre d'octets déjà reçus (reprise).
     Offset(u64),
+    /// Réponse avec données (synchronisation des canevas).
+    Data(String),
 }
 
 pub(crate) struct Inner {
@@ -274,6 +276,8 @@ pub(crate) struct Inner {
     pub update: Mutex<crate::update::UpdateStatus>,
     /// Profils : le nôtre et ceux des contacts.
     pub profiles: Mutex<crate::profile::ProfileStore>,
+    /// Canevas partagés (documents Yjs par conversation).
+    pub canvases: Mutex<crate::canvas::CanvasStore>,
     /// Tests : la coupure simulée n'a lieu qu'une fois.
     pub test_cut_done: AtomicBool,
     /// Discussions (conversations, journal d'événements, synchronisation).
@@ -313,6 +317,7 @@ impl Engine {
         let secret = crypto::secret_from_b64(&identity.secret_key)?;
         let chat = ChatStore::load(store.dir().join("discussions"), &identity.id);
         let profiles = crate::profile::ProfileStore::load(store.dir());
+        let canvases = crate::canvas::CanvasStore::load(store.dir());
 
         let trusted: HashMap<String, TrustedPeer> = store
             .load::<Vec<TrustedPeer>>("trusted.json")
@@ -345,6 +350,7 @@ impl Engine {
                 other_versions: Mutex::default(),
                 update: Mutex::default(),
                 profiles: Mutex::new(profiles),
+                canvases: Mutex::new(canvases),
                 test_cut_done: AtomicBool::new(false),
                 chat: Mutex::new(chat),
                 dirty: AtomicBool::new(true),
@@ -358,6 +364,7 @@ impl Engine {
         crate::transfer::spawn_scheduler(engine.inner.clone());
         crate::chat::spawn_chat_scheduler(engine.inner.clone());
         crate::profile::spawn_profile_scheduler(engine.inner.clone());
+        crate::canvas::spawn_canvas_scheduler(engine.inner.clone());
         engine.spawn_update_checker();
         Ok(engine)
     }
@@ -959,6 +966,7 @@ impl Inner {
             match self.handle_message(&sender, &plain, &mut started) {
                 Ok(Reply::None) => {}
                 Ok(Reply::Offset(offset)) => write_ack(&mut channel, &Ack::offset(offset)),
+                Ok(Reply::Data(data)) => write_ack(&mut channel, &Ack { ok: true, data, ..Ack::default() }),
                 Err(error) => {
                     let code = error.downcast_ref::<Refusal>().map(|refusal| refusal.code).unwrap_or("error");
                     if !matches!(code, "unknown-conversation" | "not-member") {
@@ -1066,6 +1074,10 @@ impl Inner {
             Message::Profile { profile } => {
                 self.receive_profile(sender, profile, body)?;
                 Ok(Reply::None)
+            }
+            Message::CanvasSync { conversation, canvas, update, state } => {
+                let reply = self.receive_canvas_sync(sender, &conversation, canvas, &update, &state)?;
+                Ok(Reply::Data(reply))
             }
         }
     }

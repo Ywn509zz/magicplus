@@ -222,12 +222,22 @@ fn table_view(block: &Block, width: f64, mtm: MainThreadMarker) -> Retained<NSVi
                     span.bold = true;
                 }
             }
-            let field = text_field(&attributed_spans(&spans, 12.5, None, mtm), cell_width - 14.0, mtm);
-            field.setAlignment(match table.align.get(column) {
+            // L'alignement d'un texte mis en forme se règle par son style de paragraphe.
+            let alignment = match table.align.get(column) {
                 Some(Align::Center) => NSTextAlignment::Center,
                 Some(Align::Right) => NSTextAlignment::Right,
                 _ => NSTextAlignment::Left,
-            });
+            };
+            let text = NSMutableAttributedString::initWithAttributedString(
+                NSMutableAttributedString::alloc(),
+                &attributed_spans(&spans, 12.5, None, mtm),
+            );
+            let paragraph = objc2_app_kit::NSMutableParagraphStyle::new();
+            paragraph.setAlignment(alignment);
+            let length = text.length();
+            unsafe { text.addAttribute_value_range(objc2_app_kit::NSParagraphStyleAttributeName, &paragraph, NSRange::new(0, length)) };
+            let field = text_field(&text, cell_width - 14.0, mtm);
+            field.setAlignment(alignment);
             let cell = NSView::new(mtm);
             cell.setTranslatesAutoresizingMaskIntoConstraints(false);
             cell.addSubview(&field);

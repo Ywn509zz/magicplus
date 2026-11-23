@@ -1,0 +1,548 @@
+// Canevas (Windows) : pages partagées d'une conversation, écrites à plusieurs en temps réel.
+// Données et actions : global `CanvasData`, rempli par src/ui_slint/canvas.rs.
+
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { MarkdownView, BlockItem, MarkdownStyle } from "markdown.slint";
+
+export struct CanvasItem {
+    title: string,
+    detail: string,
+    selected: bool,
+    editing: bool,
+}
+
+export struct VersionItem {
+    title: string,
+    detail: string,
+    summary: string,
+    selected: bool,
+}
+
+export struct FormatButton {
+    kind: string,
+    label: string,
+    tooltip: string,
+}
+
+export struct FormatResult {
+    text: string,
+    anchor: int,
+    cursor: int,
+}
+
+export global CanvasData {
+    in-out property <bool> open;
+    in property <[CanvasItem]> canvases;
+    in property <bool> has-canvas;
+    in property <string> title;
+    in property <string> editing;
+    in property <[BlockItem]> preview;
+    // Texte du moteur : l'éditeur le reprend quand `remote-request` change (curseur gardé).
+    in property <string> text;
+    in-out property <int> remote-request;
+    in property <bool> history;
+    in property <[VersionItem]> versions;
+    in property <bool> has-version;
+    in property <string> version-info;
+    in property <string> version-label;
+    in property <[BlockItem]> version-preview;
+    in property <[FormatButton]> formats;
+    in property <[string]> colors;
+
+    callback toggle();
+    callback select(int);
+    callback create();
+    callback rename(string);
+    callback delete();
+    callback edited(string);
+    // Nouvelle position (octets) d'un curseur quand le texte passe de l'un à l'autre.
+    pure callback transform(string, string, int) -> int;
+    callback format(string, string, int, int) -> FormatResult;
+    callback history-toggle();
+    callback version-select(int);
+    callback restore();
+    callback name-version(string);
+    callback open-link(string);
+}
+
+component SmallButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    callback clicked;
+    height: 26px;
+    min-width: label.preferred-width + 16px;
+    preferred-width: label.preferred-width + 16px;
+    border-radius: 5px;
+    background: root.primary ? Theme.accent : touch.pressed ? Theme.nav-selected : touch.has-hover ? Theme.nav-hover : Theme.bubble;
+    label := Text {
+        text: root.text;
+        color: root.primary ? (Theme.dark ? #000000 : #ffffff) : Theme.text;
+        font-size: 12px;
+        font-weight: 600;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Éditeur Markdown : garde la position du curseur quand le texte des autres arrive.
+component CanvasEditor inherits Rectangle {
+    property <int> remote: CanvasData.remote-request;
+    property <int> next-anchor;
+    property <int> next-cursor;
+    property <FormatResult> result;
+    background: Theme.dark ? #1e1e1e : #ffffff;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.card-border;
+    border-radius: 6px;
+
+    changed remote => {
+        root.next-anchor = CanvasData.transform(input.text, CanvasData.text, input.anchor-position-byte-offset);
+        root.next-cursor = CanvasData.transform(input.text, CanvasData.text, input.cursor-position-byte-offset);
+        input.text = CanvasData.text;
+        input.set-selection-offsets(root.next-anchor, root.next-cursor);
+    }
+
+    public function apply-format(kind: string) {
+        root.result = CanvasData.format(kind, input.text, input.anchor-position-byte-offset, input.cursor-position-byte-offset);
+        input.text = root.result.text;
+        input.set-selection-offsets(root.result.anchor, root.result.cursor);
+        CanvasData.edited(input.text);
+        input.focus();
+    }
+
+    scroll := ScrollView {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        content-width: self.visible-width;
+        content-height: max(self.visible-height, input.preferred-height + 20px);
+
+        input := TextInput {
+            x: 10px;
+            y: 10px;
+            width: parent.width - 20px;
+            text: CanvasData.text;
+            single-line: false;
+            wrap: word-wrap;
+            font-family: MarkdownStyle.mono;
+            font-size: 13px;
+            color: Theme.text;
+            selection-background-color: Theme.accent.with-alpha(0.35);
+            edited => {
+                CanvasData.edited(self.text);
+            }
+            cursor-position-changed(cpos) => {
+                if (cpos.y + 10px + scroll.content-y < 0px) {
+                    scroll.content-y = min(0px, -cpos.y);
+                } else if (cpos.y + 10px + scroll.content-y > scroll.visible-height - 24px) {
+                    scroll.content-y = min(0px, max(scroll.visible-height - scroll.content-height, scroll.visible-height - cpos.y - 40px));
+                }
+            }
+        }
+    }
+
+    if input.text == "": Text {
+        x: 11px;
+        y: 11px;
+        text: "Écrivez ici en Markdown : # titre, - liste, **gras**, | tableau |… ou utilisez les boutons.";
+        color: Theme.subtle;
+        font-size: 13px;
+    }
+}
+
+export component CanvasPane inherits Rectangle {
+    property <bool> confirm-delete;
+    property <string> new-label;
+    // Fenêtre étroite : liste plus fine et onglets « Modifier / Aperçu » au lieu du côte à côte.
+    property <bool> narrow: self.width < 820px;
+    property <bool> show-preview;
+    background: Theme.chat-bg;
+
+    TouchArea { }
+
+    HorizontalLayout {
+        // ---- liste des canevas
+        Rectangle {
+            width: root.narrow ? 170px : 220px;
+            background: Theme.list-bg;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Canevas";
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    SmallButton {
+                        text: "+ Nouveau";
+                        clicked => {
+                            CanvasData.create();
+                        }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        for item[i] in CanvasData.canvases: Rectangle {
+                            height: 48px;
+                            border-radius: 6px;
+                            background: item.selected ? Theme.nav-selected : row.has-hover ? Theme.nav-hover : transparent;
+                            row := TouchArea {
+                                clicked => {
+                                    CanvasData.select(i);
+                                }
+                            }
+                            VerticalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: "📄 " + item.title;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: item.detail;
+                                    color: item.editing ? Theme.success : Theme.subtle;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.card-border;
+            }
+        }
+
+        // ---- canevas ouvert
+        if !CanvasData.has-canvas: VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            padding: 40px;
+            spacing: 10px;
+            Text {
+                text: "Écrivez ensemble, en direct";
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Un canevas est une page que tous les membres écrivent en même temps : listes, tableaux, titres, couleurs, code… Chaque pause d'écriture crée une version que l'on peut retrouver dans l'historique.";
+                color: Theme.subtle;
+                font-size: 13px;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+            HorizontalLayout {
+                alignment: center;
+                SmallButton {
+                    text: "+ Nouveau canevas";
+                    primary: true;
+                    clicked => {
+                        CanvasData.create();
+                    }
+                }
+            }
+        }
+
+        if CanvasData.has-canvas: VerticalLayout {
+            horizontal-stretch: 1;
+            padding: 12px;
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                LineEdit {
+                    text: CanvasData.title;
+                    font-size: 15px;
+                    horizontal-stretch: 1;
+                    min-width: 80px;
+                    accepted(value) => {
+                        CanvasData.rename(value);
+                    }
+                }
+                if CanvasData.editing != "": Text {
+                    text: CanvasData.editing;
+                    color: Theme.success;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                SmallButton {
+                    text: CanvasData.history ? "Modifier" : "Historique";
+                    clicked => {
+                        CanvasData.history-toggle();
+                    }
+                }
+                if !root.confirm-delete: SmallButton {
+                    text: "Supprimer";
+                    clicked => {
+                        root.confirm-delete = true;
+                    }
+                }
+                if root.confirm-delete: SmallButton {
+                    text: "Supprimer pour tous ?";
+                    primary: true;
+                    clicked => {
+                        root.confirm-delete = false;
+                        CanvasData.delete();
+                    }
+                }
+                if root.confirm-delete: SmallButton {
+                    text: "Annuler";
+                    clicked => {
+                        root.confirm-delete = false;
+                    }
+                }
+            }
+
+            // Barre de mise en forme, éditeur et aperçu (un seul bloc : la barre agit sur l'éditeur).
+            if !CanvasData.history: VerticalLayout {
+              vertical-stretch: 1;
+              spacing: 8px;
+              if root.narrow: HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                SmallButton {
+                    text: "Modifier";
+                    primary: !root.show-preview;
+                    clicked => {
+                        root.show-preview = false;
+                    }
+                }
+                SmallButton {
+                    text: "Aperçu";
+                    primary: root.show-preview;
+                    clicked => {
+                        root.show-preview = true;
+                    }
+                }
+              }
+              // Barre de mise en forme (défile si la fenêtre est trop étroite).
+              ScrollView {
+                height: 30px;
+                vertical-scrollbar-policy: always-off;
+                content-height: 30px;
+              HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                for f in CanvasData.formats: SmallButton {
+                    text: f.label;
+                    clicked => {
+                        editor.apply-format(f.kind);
+                    }
+                }
+                SmallButton {
+                    text: "Couleur ▾";
+                    clicked => {
+                        colors.show();
+                    }
+                    colors := PopupWindow {
+                        y: 28px;
+                        width: 130px;
+                        height: CanvasData.colors.length * 26px + 8px;
+                        close-policy: close-on-click-outside;
+                        Rectangle {
+                            background: Theme.popup;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.card-border;
+                            for name[i] in CanvasData.colors: Rectangle {
+                                x: 4px;
+                                y: 4px + i * 26px;
+                                width: parent.width - 8px;
+                                height: 26px;
+                                border-radius: 4px;
+                                background: pick.has-hover ? Theme.nav-hover : transparent;
+                                Text {
+                                    x: 8px;
+                                    text: name;
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    height: parent.height;
+                                }
+                                pick := TouchArea {
+                                    clicked => {
+                                        editor.apply-format("color:" + name);
+                                        colors.close();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+              }
+              HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: root.narrow ? 0px : 12px;
+                editor := CanvasEditor {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    max-width: root.narrow && root.show-preview ? 0px : 100000px;
+                    visible: !(root.narrow && root.show-preview);
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    max-width: root.narrow && !root.show-preview ? 0px : 100000px;
+                    visible: !(root.narrow && !root.show-preview);
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    border-radius: 6px;
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 12px;
+                            alignment: start;
+                            MarkdownView {
+                                blocks: CanvasData.preview;
+                                link-clicked(url) => {
+                                    CanvasData.open-link(url);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            }
+
+            if CanvasData.history: HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 12px;
+                ScrollView {
+                    width: root.narrow ? 170px : 280px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        if CanvasData.versions.length == 0: Text {
+                            text: "Pas encore de version : elles se créent toutes seules après chaque pause d'écriture.";
+                            color: Theme.subtle;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        for v[i] in CanvasData.versions: Rectangle {
+                            height: 62px;
+                            border-radius: 6px;
+                            background: v.selected ? Theme.nav-selected : vrow.has-hover ? Theme.nav-hover : transparent;
+                            vrow := TouchArea {
+                                clicked => {
+                                    CanvasData.version-select(i);
+                                }
+                            }
+                            VerticalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                alignment: center;
+                                spacing: 1px;
+                                Text {
+                                    text: v.title;
+                                    color: Theme.text;
+                                    font-size: 12.5px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: v.detail;
+                                    color: Theme.subtle;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: v.summary;
+                                    color: Theme.subtle;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    spacing: 8px;
+                    Text {
+                        text: CanvasData.version-info;
+                        color: Theme.subtle;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if CanvasData.has-version: HorizontalLayout {
+                        alignment: start;
+                        SmallButton {
+                            text: "Restaurer cette version";
+                            primary: true;
+                            clicked => {
+                                CanvasData.restore();
+                            }
+                        }
+                    }
+                    if CanvasData.has-version: HorizontalLayout {
+                        spacing: 6px;
+                        LineEdit {
+                            text <=> root.new-label;
+                            placeholder-text: CanvasData.version-label == "" ? "Nom de la version" : CanvasData.version-label;
+                            horizontal-stretch: 1;
+                            min-width: 60px;
+                            accepted(value) => {
+                                CanvasData.name-version(value);
+                            }
+                        }
+                        SmallButton {
+                            text: "Nommer";
+                            clicked => {
+                                CanvasData.name-version(root.new-label);
+                                root.new-label = "";
+                            }
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-width: 1px;
+                        border-color: Theme.card-border;
+                        border-radius: 6px;
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 12px;
+                                alignment: start;
+                                MarkdownView {
+                                    blocks: CanvasData.version-preview;
+                                    link-clicked(url) => {
+                                        CanvasData.open-link(url);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

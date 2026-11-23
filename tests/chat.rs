@@ -339,6 +339,72 @@ fn profiles_reach_paired_devices_and_group_members() {
     }
 }
 
+/// Canevas : créé par A, écrit en même temps par B et C (jamais associés entre eux), même texte
+/// partout, arrivée rapide des frappes, historique et restauration.
+#[test]
+fn group_canvas_real_time_and_history() {
+    let nodes = start_nodes("canevas", 3);
+    let (a, b, c) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine);
+    trust(a, b);
+    trust(a, c);
+    trust(b, a);
+    trust(c, a);
+    let group = a.create_group("Canevas", &[id_of(b), id_of(c)]).unwrap();
+    wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
+
+    let id = a.create_canvas(&group, "Courses").unwrap();
+    a.set_canvas_text(&group, &id, "# Courses\n- pain\n").unwrap();
+    for (engine, name) in [(b, "B"), (c, "C")] {
+        wait_for(&format!("{name} voit le canevas"), Duration::from_secs(10), || {
+            engine.canvases(&group).iter().any(|cv| cv.id == id && cv.title == "Courses" && cv.text.contains("pain"))
+        });
+    }
+
+    // Temps réel : une frappe de B arrive vite chez C.
+    let started = Instant::now();
+    b.set_canvas_text(&group, &id, "# Courses\n- pain\n- lait\n").unwrap();
+    wait_for("C voit « lait »", Duration::from_secs(5), || c.canvases(&group)[0].text.contains("lait"));
+    assert!(started.elapsed() < Duration::from_secs(3), "trop lent : {:?}", started.elapsed());
+
+    // B et C écrivent en même temps à deux endroits : rien ne se perd, tout le monde converge.
+    let base = c.canvases(&group)[0].text.clone();
+    b.set_canvas_text(&group, &id, &base.replace("# Courses", "# Courses de la semaine")).unwrap();
+    c.set_canvas_text(&group, &id, &format!("{base}- œufs\n")).unwrap();
+    wait_for("les trois ont le même texte", Duration::from_secs(10), || {
+        let texts: Vec<String> = [a, b, c].iter().map(|e| e.canvases(&group)[0].text.clone()).collect();
+        texts.iter().all(|t| t == &texts[0] && t.contains("de la semaine") && t.contains("œufs"))
+    });
+
+    // Historique : une version (forcée ici, sinon après 45 s de pause), puis restauration.
+    let before = a.canvases(&group)[0].text.clone();
+    b.save_canvas_version(&group, &id).unwrap();
+    wait_for("A voit la version de B", Duration::from_secs(10), || {
+        a.canvas_versions(&group, &id).iter().any(|v| v.authors == ["Machine B"])
+    });
+    a.set_canvas_text(&group, &id, "tout effacé").unwrap();
+    a.save_canvas_version(&group, &id).unwrap();
+    let version = a.canvas_versions(&group, &id).into_iter().find(|v| v.authors == ["Machine B"]).unwrap();
+    a.name_canvas_version(&group, &id, &version.id, "Avant le ménage").unwrap();
+    a.restore_canvas_version(&group, &id, &version.id).unwrap();
+    wait_for("C reçoit la restauration et le nom de version", Duration::from_secs(10), || {
+        let text = c.canvases(&group)[0].text.clone();
+        let versions = c.canvas_versions(&group, &id);
+        text == before
+            && versions.iter().any(|v| v.label == "Avant le ménage")
+            && versions.iter().any(|v| v.summary.starts_with("Restauration"))
+    });
+    assert!(before.contains("œufs"));
+
+    // Renommer puis supprimer : partout.
+    c.rename_canvas(&group, &id, "Liste").unwrap();
+    wait_for("A voit le nouveau titre", Duration::from_secs(10), || a.canvases(&group)[0].title == "Liste");
+    a.delete_canvas(&group, &id).unwrap();
+    wait_for("B ne voit plus le canevas", Duration::from_secs(10), || b.canvases(&group).is_empty());
+    for node in &nodes {
+        node.engine.shutdown();
+    }
+}
+
 /// Message de démonstration qui utilise tout le Markdown pris en charge.
 const DEMO_MARKDOWN: &str = "## Programme du voyage
 -# mis à jour ce matin
@@ -437,6 +503,24 @@ fn donnees_de_demo() {
     wait_for("tout reçu", Duration::from_secs(20), || {
         texts(&a.messages(&group, 50)).len() == 4
             && a.messages(&direct, 50).iter().any(|m| m.attachments.iter().any(|x| x.path.is_some()))
+    });
+    // Canevas partagé, écrit à plusieurs, avec un historique.
+    let canvas = a.create_canvas(&group, "Préparatifs").unwrap();
+    a.set_canvas_text(&group, &canvas, "# Préparatifs du week-end\n\n## À emporter\n- [x] tente\n- [ ] glacière\n").unwrap();
+    a.save_canvas_version(&group, &canvas).unwrap();
+    wait_for("B voit le canevas", Duration::from_secs(10), || b.canvases(&group).iter().any(|cv| cv.text.contains("glacière")));
+    let text = b.canvases(&group)[0].text.clone();
+    b.set_canvas_text(
+        &group,
+        &canvas,
+        &format!(
+            "{text}- [ ] <font color=\"orange\">crème solaire</font>\n\n## Budget\n| Poste | Montant |\n|:--|--:|\n| Location | 420 € |\n| Courses | 160 € |\n\n> [!NOTE]\n> Départ **samedi 8 h** devant chez Léa.\n"
+        ),
+    )
+    .unwrap();
+    b.save_canvas_version(&group, &canvas).unwrap();
+    wait_for("A voit le canevas complet", Duration::from_secs(10), || {
+        a.canvases(&group)[0].text.contains("Budget") && a.canvas_versions(&group, &canvas).len() == 2
     });
     a.mark_read(&group);
     thread::sleep(Duration::from_secs(2));

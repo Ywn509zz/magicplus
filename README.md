@@ -104,7 +104,9 @@ cargo test
 - `tests/chat.rs` : discussion à deux (réponse, modification, réaction, accusé de lecture, « écrit… »,
   suppression), messages **complets et dans l'ordre** après une longue absence du destinataire,
   groupe de trois membres présentés par le créateur (sans association entre eux), pièces jointes et
-  autocollants. `donnees_de_demo` (ignoré) fabrique des discussions de démonstration dans
+  autocollants, profils (reçus par un associé et par un simple membre de groupe), **canevas** à
+  trois (frappes simultanées fusionnées, arrivée en moins de 3 s, versions nommées, restauration,
+  renommage, suppression). `donnees_de_demo` (ignoré) fabrique des discussions de démonstration dans
   `MAGICPLUS_DEMO_DIR` pour les captures d'écran.
 - `Config::fail_after_chunks` et `Config::retry_delay` servent aux tests de coupure et de reprise.
 
@@ -310,6 +312,37 @@ membre, par le même canal Noise que le reste.
 - **Limite** : pas de relais. Un message attend que son destinataire soit joignable **en même temps**
   que son auteur ; dans un groupe, chaque auteur livre lui-même ses messages à chaque membre.
 
+### Canevas — `src/canvas.rs`
+
+Pages partagées d'une conversation (pensées pour les groupes), que tous les membres écrivent
+**ensemble et en direct**, en Markdown complet (titres, listes, cases, tableaux, couleurs, code…).
+
+- **Fusion sans conflit** : chaque conversation a un document Yjs (crate `yrs`, CRDT) : `canevas`
+  (carte id → titre, auteur, date en JSON), `texte/<id>` (texte), `versions/<id>` (historique).
+  Une frappe ne transmet que la différence (préfixe et suffixe communs) ; deux personnes qui tapent
+  en même temps, même hors ligne pendant des jours, obtiennent le même texte une fois réunies.
+- **Synchronisation** : message `canvas-sync` {conversation, canevas en cours de modification,
+  `update` = ce qui manque au destinataire d'après son dernier état connu, `state` = notre état} ;
+  la réponse (`Ack.data`, JSON) contient ce qui nous manque et l'état du destinataire : un seul
+  aller-retour. Chaque frappe part tout de suite vers les membres joignables (le planificateur
+  tourne toutes les 150 ms) ; un échange complet a lieu au moins toutes les 30 s avec chacun.
+  Seuls les membres (clé prouvée) d'une conversation non quittée sont acceptés.
+- **Présence** : « X modifie… » pendant 5 s après chaque frappe reçue.
+- **Historique intelligent** : les modifications d'une personne forment une version après 45 s de
+  pause (ou 10 min d'écriture continue) : auteur, heure, caractères ajoutés/retirés, résumé (début
+  de la partie modifiée) et texte complet. Ouvrir l'historique clôt la séance en cours. On peut
+  voir une version, la **nommer** (jamais supprimée ensuite) ou la **restaurer** (devient une
+  nouvelle version, l'état précédent reste). 150 versions au plus par canevas (les plus anciennes
+  sans nom partent d'abord). Les versions sont partagées par tous les membres.
+- **Éditeur** : texte Markdown à gauche, aperçu à droite (onglets « Modifier / Aperçu » si la
+  fenêtre est étroite sous Windows), barre de mise en forme commune (`canvas::FORMATS`,
+  `canvas::apply_format` : gras, italique, souligné, barré, titres, listes, cases, citation, code,
+  bloc de code, tableau, séparateur, lien, couleurs). Quand le texte d'un autre arrive, le curseur
+  reste au même endroit (`canvas::transform_offset`). Mac : `src/ui_mac_canvas.rs` (`NSTextView`) ;
+  Windows : `ui/canvas.slint` + `src/ui_slint/canvas.rs` (`TextInput` dont on lit la position du
+  curseur).
+- Stockage : `canevas/<conversation>.yjs` (état complet, encodage Yjs v1), enregistré toutes les 2 s.
+
 ### Profils — `src/profile.rs`
 
 Comme sur Discord : photo de profil (fixe ou GIF animé), bannière (image ou couleur), pronoms et
@@ -371,6 +404,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `mise-a-jour/` | version téléchargée en attente d'installation (effacée au démarrage suivant) |
 | `profil/` | notre profil (`profil.json`, `avatar.*`, `banniere.*`) et les versions confirmées par chaque contact (`envois.json`) |
 | `profils/<id>/` | profils reçus des contacts |
+| `canevas/<conversation>.yjs` | canevas partagés de la conversation (document Yjs) |
 | `envois.json` | envois en attente ou à reprendre |
 | `partiels/` | fichiers en cours de réception (`<id>.part`) et leur description (`<id>.json`) |
 | `discussions/etat.json` | conversations : membres, compteurs envoyés/confirmés/appliqués, lectures |
@@ -390,9 +424,10 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/markdown.rs` | Markdown des messages (analyse, texte brut, réécriture pour Slint). |
 | `src/update.rs` | Mises à jour : recherche sur GitHub, téléchargement vérifié, remplacement de l'app. |
 | `src/profile.rs` | Profils : images, diffusion aux contacts, réception. |
+| `src/canvas.rs` | Canevas partagés : document Yjs, synchronisation, versions, mise en forme. |
 | `src/highlight.rs` | Coloration des blocs de code. |
-| `src/ui_mac_markdown.rs`, `src/ui_mac_profile.rs` | Mac : affichage du Markdown, profils (photos, carte, réglages). |
-| `src/ui_slint/markdown.rs`, `profile.rs`, `images.rs` + `ui/markdown.slint`, `ui/profile.slint` | Windows : Markdown, profils, images de profil. |
+| `src/ui_mac_markdown.rs`, `src/ui_mac_profile.rs`, `src/ui_mac_canvas.rs` | Mac : affichage du Markdown, profils (photos, carte, réglages), canevas. |
+| `src/ui_slint/markdown.rs`, `profile.rs`, `images.rs`, `canvas.rs` + `ui/markdown.slint`, `ui/profile.slint`, `ui/canvas.slint` | Windows : Markdown, profils, images de profil, canevas. |
 | `src/net.rs` | Annonces et écoute UDP, écoute TCP. |
 | `src/secure.rs` | Canal chiffré Noise (poignée de main, messages chiffrés). |
 | `src/protocol.rs` | Constantes (ports, tailles), `Hello`, `Message`, `Ack`. |
@@ -415,7 +450,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | Variable | Effet |
 | --- | --- |
 | `MAGICPLUS_DATA_DIR=/chemin` | Autre dossier de données (seconde instance de test, captures). |
-| `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation. |
+| `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation, `MAGICPLUS_START_CANVAS=1` (ou `historique`) ses canevas. |
 | `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série. |
 | `MAGICPLUS_DEMO_DIR=/dossier` | Avec `cargo test --test chat donnees_de_demo -- --ignored` : fabrique des discussions de démonstration. |
 | `--features slint-on-mac` | Développement : compile l'interface Windows (Slint) sur un Mac, par exemple `cargo build --features slint-on-mac --target-dir target/slint-mac`. Lent sur un Mac sans Metal ; sert à vérifier et photographier l'interface. |

@@ -101,6 +101,16 @@ pub enum Message {
     Profile {
         profile: ProfileInfo,
     },
+    /// Canevas d'une conversation : ce qui manque au destinataire (mise à jour Yjs v1, base64) et
+    /// l'état de l'expéditeur. Réponse : `Ack.data` = ce qui manque à l'expéditeur et l'état du
+    /// destinataire (JSON). `canvas` : le canevas en cours de modification (« X modifie… »).
+    CanvasSync {
+        conversation: String,
+        #[serde(default)]
+        canvas: Option<String>,
+        update: String,
+        state: String,
+    },
 }
 
 /// Image d'un profil, envoyée à la suite de l'en-tête.
@@ -220,6 +230,9 @@ pub struct Ack {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
+    /// Données de réponse (synchronisation des canevas).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data: String,
 }
 
 impl Ack {
@@ -232,7 +245,7 @@ impl Ack {
     }
 
     pub fn refused(error: impl Into<String>, code: impl Into<String>) -> Self {
-        Self { ok: false, error: error.into(), code: code.into(), offset: None }
+        Self { ok: false, error: error.into(), code: code.into(), ..Self::default() }
     }
 }
 

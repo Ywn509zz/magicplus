@@ -1,6 +1,7 @@
 //! Interface Slint (style Fluent / Windows 11), utilisée sous Windows et Linux.
 //! La page « Discussions » est dans `ui_slint/chat.rs`.
 
+mod canvas;
 mod chat;
 mod images;
 mod markdown;
@@ -186,6 +187,7 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     refresh(&ui, &initial, true);
     ui.global::<MarkdownStyle>().set_mono(markdown::monospace_family().into());
     let chat: Rc<chat::Chat> = chat::Chat::new(engine.clone(), &ui);
+    let canvas = canvas::Canvas::new(engine.clone(), chat.clone(), &ui);
     refresh_my_profile(&ui, &engine, true);
     let profiles_seen = Rc::new(std::cell::Cell::new(engine.profiles_revision()));
     {
@@ -403,6 +405,7 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         let chat = chat.clone();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
             chat.tick();
+            canvas.tick();
             let profiles = engine.profiles_revision();
             if profiles != profiles_seen.get() {
                 profiles_seen.set(profiles);
@@ -460,7 +463,18 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
                 let data = ui.global::<ChatData>();
                 data.invoke_show_profile(data.get_peer_id());
             })),
+            ("canevas", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                ui.global::<CanvasData>().invoke_toggle();
+            })),
+            ("canevas-historique", Box::new(|ui, _| {
+                let data = ui.global::<CanvasData>();
+                data.invoke_history_toggle();
+                data.invoke_version_select(0);
+            })),
             ("discussion-clair", Box::new(|ui, chat| {
+                ui.global::<CanvasData>().set_open(false);
                 ui.invoke_apply_theme(false);
                 ui.set_page(chat::CHAT_PAGE);
                 chat.select_index(0);

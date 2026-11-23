@@ -1,6 +1,6 @@
 [package]
 name = "magicplus"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "MagicPlus : presse-papiers et transfert de fichiers chiffrés entre machines du réseau local."
 build = "build.rs"
@@ -30,6 +30,8 @@ snow = "0.9"
 uuid = { version = "1", features = ["v4"] }
 # Markdown des messages et des canevas (CommonMark + tableaux, cases à cocher…).
 pulldown-cmark = { version = "0.13", default-features = false }
+# Canevas partagés : édition à plusieurs en temps réel sans conflit (CRDT Yjs).
+yrs = "0.28"
 # Heure locale des messages (fuseau du système, sans Internet).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Interface Slint (Windows, Linux). Sur Mac, seulement avec `--features slint-on-mac` (essais).
