@@ -1,0 +1,162 @@
+// Profils, comme sur Discord : photo ronde, bannière (image ou couleur), pronoms, « À propos ».
+
+import { Theme } from "theme.slint";
+import { MarkdownView, BlockItem } from "markdown.slint";
+
+export struct ProfileItem {
+    id: string,
+    name: string,
+    pronouns: string,
+    bio: [BlockItem],
+    has-bio: bool,
+    banner: image,
+    has-banner: bool,
+    banner-color: color,
+    photo: image,
+    has-photo: bool,
+    initials: string,
+    color: color,
+    me: bool,
+    can-chat: bool,
+}
+
+// Photo de profil ronde, ou pastille colorée avec les initiales.
+export component Avatar inherits Rectangle {
+    in property <string> initials;
+    in property <color> tint;
+    in property <length> size: 38px;
+    in property <image> photo;
+    in property <bool> has-photo;
+    in property <bool> show-presence;
+    in property <bool> online;
+    in property <color> ring: Theme.list-bg;
+    width: root.size;
+    height: root.size;
+
+    Rectangle {
+        width: root.size;
+        height: root.size;
+        border-radius: root.size / 2;
+        background: root.tint;
+        clip: true;
+
+        if !root.has-photo: Text {
+            text: root.initials;
+            color: #ffffff;
+            font-size: root.size * 0.38;
+            font-weight: 600;
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if root.has-photo: Image {
+            source: root.photo;
+            width: parent.width;
+            height: parent.height;
+            image-fit: cover;
+        }
+    }
+
+    if root.show-presence: Rectangle {
+        width: root.size * 0.36;
+        height: self.width;
+        x: parent.width - self.width + 1px;
+        y: parent.height - self.height + 1px;
+        border-radius: self.width / 2;
+        background: root.online ? Theme.success : Theme.neutral;
+        border-width: 2.5px;
+        border-color: root.ring;
+    }
+}
+
+// Carte de profil : bannière, photo qui déborde, nom, pronoms, « À propos de moi ».
+// Les enfants (boutons) se placent sous le texte.
+export component ProfileCard inherits Rectangle {
+    in property <ProfileItem> profile;
+    in property <length> card-width: 300px;
+    callback link-clicked(string);
+    width: root.card-width;
+    preferred-height: layout.preferred-height;
+    min-height: layout.min-height;
+    background: Theme.popup;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    clip: true;
+
+    layout := VerticalLayout {
+        Rectangle {
+            height: root.card-width * 0.4 + 44px;
+
+            Rectangle {
+                y: 0px;
+                height: root.card-width * 0.4;
+                background: root.profile.banner-color;
+                clip: true;
+                if root.profile.has-banner: Image {
+                    source: root.profile.banner;
+                    width: parent.width;
+                    height: parent.height;
+                    image-fit: cover;
+                }
+            }
+
+            Rectangle {
+                x: 14px;
+                y: parent.height - 88px;
+                width: 88px;
+                height: 88px;
+                border-radius: 44px;
+                background: Theme.popup;
+                Avatar {
+                    x: 4px;
+                    y: 4px;
+                    size: 80px;
+                    initials: root.profile.initials;
+                    tint: root.profile.color;
+                    photo: root.profile.photo;
+                    has-photo: root.profile.has-photo;
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-top: 8px;
+            padding-bottom: 14px;
+            spacing: 4px;
+            Text {
+                text: root.profile.name;
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            if root.profile.pronouns != "": Text {
+                text: root.profile.pronouns;
+                color: Theme.subtle;
+                font-size: 12px;
+            }
+            if root.profile.has-bio: Rectangle {
+                height: 1px;
+                background: Theme.card-border;
+            }
+            if root.profile.has-bio: Text {
+                text: "À PROPOS DE MOI";
+                color: Theme.subtle;
+                font-size: 10.5px;
+                font-weight: 700;
+            }
+            if root.profile.has-bio: MarkdownView {
+                blocks: root.profile.bio;
+                font-size: 12.5px;
+                link-clicked(url) => {
+                    root.link-clicked(url);
+                }
+            }
+            @children
+        }
+    }
+}

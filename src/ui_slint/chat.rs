@@ -121,7 +121,7 @@ fn decode(path: &Path, frame: Frame) -> Option<Decoded> {
     Some(Decoded { frames: vec![pixel_buffer(&image.to_rgba8())], frame_ms: 0, width: w, height: h })
 }
 
-fn avatar_color(seed: &str) -> Color {
+pub(super) fn avatar_color(seed: &str) -> Color {
     // Même teinte que sur le Mac (saturation 0,45, luminosité 0,72).
     let (s, v) = (0.45_f32, 0.72_f32);
     let h = avatar_hue(seed) * 6.0;
@@ -219,6 +219,22 @@ impl Chat {
         data.set_stickers(ModelRc::from(chat.stickers.clone()));
         install(&chat, &data);
         chat
+    }
+
+    /// Photo de profil d'un appareil (fixe), s'il en a une.
+    fn photo_of(&self, id: &str, size: u32) -> Option<slint::Image> {
+        let path = self.engine.profile(id)?.avatar?;
+        super::images::still(&path, size)
+    }
+
+    /// Carte de profil : remplie puis affichée par la page.
+    fn show_profile(&self, id: &str) {
+        let Some(ui) = self.ui() else { return };
+        let Some(profile) = self.engine.profile(id) else { return };
+        let can_chat = !profile.me && self.engine.snapshot().peers.iter().any(|p| p.id == profile.id && p.trusted);
+        let data = ui.global::<ChatData>();
+        data.set_profile(super::profile::profile_item(&profile, can_chat));
+        data.set_profile_request(data.get_profile_request() + 1);
     }
 
     fn ui(&self) -> Option<AppWindow> {
@@ -365,6 +381,10 @@ impl Chat {
         let seed = if group { conversation.id.clone() } else { others.first().map(|m| m.id.clone()).unwrap_or_default() };
         data.set_initials(initials(&conversation.title).into());
         data.set_color(avatar_color(&seed));
+        let photo = if group { None } else { self.photo_of(&seed, 128) };
+        data.set_has_photo(photo.is_some());
+        data.set_photo(photo.unwrap_or_default());
+        data.set_peer_id(if group { "".into() } else { seed.clone().into() });
         data.set_is_group(group);
         data.set_online(others.iter().any(|m| m.online));
         data.set_is_creator(conversation.is_creator);
@@ -411,11 +431,15 @@ impl Chat {
     }
 
     fn refresh_list(&self, conversations: &[ConversationView], current: Option<&str>) {
+        let profiles_revision = self.engine.profiles_revision();
         let signature: String = conversations
             .iter()
             .map(|c| {
                 let online = c.members.iter().any(|m| !m.me && m.online);
-                format!("{}|{}|{}|{}|{}|{}|{}\n", c.id, c.title, c.unread, c.last_preview, c.typing.is_empty(), online, current == Some(c.id.as_str()))
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}\n",
+                    c.id, c.title, c.unread, c.last_preview, c.typing.is_empty(), online, current == Some(c.id.as_str()), profiles_revision
+                )
             })
             .collect();
         let mut st = self.state.borrow_mut();
@@ -438,7 +462,10 @@ impl Chat {
                     selected: current == Some(c.id.as_str()),
                     initials: initials(&c.title).into(),
                     color: avatar_color(&seed),
+                    has_photo: false,
+                    photo: Default::default(),
                 }
+                .with_photo(if group { None } else { self.photo_of(&seed, 76) })
             })
             .collect();
         st.list_ids = conversations.iter().map(|c| c.id.clone()).collect();
@@ -467,6 +494,7 @@ impl Chat {
             })
             .collect();
 
+        let profiles_revision = self.engine.profiles_revision();
         let mut rendered: Vec<(String, Option<MessageItem>)> = Vec::with_capacity(messages.len());
         let mut animated = false;
         for (index, message) in messages.iter().enumerate() {
@@ -475,7 +503,8 @@ impl Chat {
             animated |= attachments.iter().any(|(item, _)| item.frames.row_count() > 1);
             let reactions: String = message.reactions.iter().map(|r| format!("{}{}{}", r.emoji, r.count, r.mine)).collect();
             let signature = format!(
-                "{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
+                profiles_revision,
                 message.id,
                 message.text,
                 message.edited,
@@ -490,6 +519,7 @@ impl Chat {
             let unchanged = !force && st.signatures.get(index) == Some(&signature);
             let item = (!unchanged).then(|| {
                 message_item(message, headers[index], Some(index) == last_mine, attachments.into_iter().map(|(item, _)| item).collect())
+                    .with_photo(self.photo_of(&message.author_id, 76))
             });
             rendered.push((signature, item));
         }
@@ -517,6 +547,7 @@ impl Chat {
                         let message = &messages[index];
                         let attachments = message.attachments.iter().map(|a| self.attachment_item(&mut st, a).0).collect();
                         message_item(message, headers[index], Some(index) == last_mine, attachments)
+                            .with_photo(self.photo_of(&message.author_id, 76))
                     })
                 })
                 .collect();
@@ -1043,6 +1074,9 @@ fn message_item(message: &MessageView, header: bool, last_mine: bool, attachment
     let status = if message.mine && (last_mine || message.status == MessageStatus::Sending) { status_label(message) } else { String::new() };
     MessageItem {
         id: message.id.clone().into(),
+        author_id: message.author_id.clone().into(),
+        has_photo: false,
+        photo: Default::default(),
         author: if message.system { markdown::plain(&message.text).into() } else { message.author_name.clone().into() },
         initials: initials(&message.author_name).into(),
         color: avatar_color(&message.author_id),
@@ -1140,4 +1174,31 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
     on!(on_send_sticker, |chat, id| chat.send_sticker(&id));
     on!(on_add_sticker, |chat| chat.add_sticker());
     on!(on_remove_sticker, |chat, id| chat.remove_sticker(&id));
+    on!(on_show_profile, |chat, id| chat.show_profile(&id));
+    on!(on_edit_profile, |chat| {
+        if let Some(ui) = chat.ui() {
+            ui.set_page(3);
+        }
+    });
+}
+
+/// Ajoute une photo de profil à un élément d'interface.
+trait WithPhoto {
+    fn with_photo(self, photo: Option<slint::Image>) -> Self;
+}
+
+impl WithPhoto for MessageItem {
+    fn with_photo(mut self, photo: Option<slint::Image>) -> Self {
+        self.has_photo = photo.is_some();
+        self.photo = photo.unwrap_or_default();
+        self
+    }
+}
+
+impl WithPhoto for ConversationItem {
+    fn with_photo(mut self, photo: Option<slint::Image>) -> Self {
+        self.has_photo = photo.is_some();
+        self.photo = photo.unwrap_or_default();
+        self
+    }
 }

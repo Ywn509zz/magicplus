@@ -7,6 +7,7 @@
 import { Button, LineEdit, CheckBox, ScrollView, TextEdit, ProgressIndicator } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { MarkdownView, BlockItem } from "markdown.slint";
+import { Avatar, ProfileCard, ProfileItem } from "profile.slint";
 
 export struct ConversationItem {
     id: string,
@@ -19,6 +20,8 @@ export struct ConversationItem {
     selected: bool,
     initials: string,
     color: color,
+    photo: image,
+    has-photo: bool,
 }
 
 export struct ReactionItem {
@@ -45,6 +48,9 @@ export struct AttachmentItem {
 export struct MessageItem {
     id: string,
     author: string,
+    author-id: string,
+    photo: image,
+    has-photo: bool,
     initials: string,
     color: color,
     mine: bool,
@@ -97,6 +103,10 @@ export global ChatData {
     in property <color> color;
     in property <bool> is-group;
     in property <bool> online;
+    in property <image> photo;
+    in property <bool> has-photo;
+    // Conversation à deux : l'autre appareil (pour ouvrir son profil).
+    in property <string> peer-id;
     in property <bool> is-creator;
     in property <bool> closed;
     in property <bool> history-start;
@@ -114,6 +124,9 @@ export global ChatData {
     // ---- demandes de Rust à l'interface
     in-out property <int> scroll-request;
     in-out property <int> focus-request;
+    // Carte de profil à afficher (remplie par Rust avant `profile-request`).
+    in property <ProfileItem> profile;
+    in-out property <int> profile-request;
     // Animation des GIF : avance de 1 toutes les 50 ms.
     in property <int> tick;
 
@@ -148,44 +161,11 @@ export global ChatData {
     callback send-sticker(string);
     callback add-sticker();
     callback remove-sticker(string);
+    callback show-profile(string);
+    callback edit-profile();
 }
 
 // ------------------------------------------------------------------ petits éléments
-
-component Avatar inherits Rectangle {
-    in property <string> initials;
-    in property <color> tint;
-    in property <length> size: 38px;
-    in property <bool> show-presence;
-    in property <bool> online;
-    in property <color> ring: Theme.list-bg;
-    width: root.size;
-    height: root.size;
-    border-radius: root.size / 2;
-    background: root.tint;
-
-    Text {
-        text: root.initials;
-        color: #ffffff;
-        font-size: root.size * 0.38;
-        font-weight: 600;
-        width: parent.width;
-        height: parent.height;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    if root.show-presence: Rectangle {
-        width: root.size * 0.36;
-        height: self.width;
-        x: parent.width - self.width + 1px;
-        y: parent.height - self.height + 1px;
-        border-radius: self.width / 2;
-        background: root.online ? Theme.success : Theme.neutral;
-        border-width: 2.5px;
-        border-color: root.ring;
-    }
-}
 
 component IconButton inherits Rectangle {
     in property <image> icon;
@@ -270,6 +250,8 @@ component ConversationRow inherits Rectangle {
             Avatar {
                 initials: root.item.initials;
                 tint: root.item.color;
+                photo: root.item.photo;
+                has-photo: root.item.has-photo;
                 size: 38px;
                 show-presence: !root.item.group;
                 online: root.item.online;
@@ -573,7 +555,15 @@ component MessageRow inherits Rectangle {
                     Avatar {
                         initials: root.message.initials;
                         tint: root.message.color;
+                        photo: root.message.photo;
+                        has-photo: root.message.has-photo;
                         size: 38px;
+                        TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                ChatData.show-profile(root.message.author-id);
+                            }
+                        }
                     }
                 }
                 if !root.message.header: Rectangle {
@@ -1042,6 +1032,45 @@ component Composer inherits Rectangle {
 
 // Conversation affichée : en-tête, messages, zone de saisie et fenêtres surgissantes.
 component ConversationPane inherits Rectangle {
+    property <int> profile-request: ChatData.profile-request;
+    changed profile-request => {
+        profile-popup.show();
+    }
+
+    profile-popup := PopupWindow {
+        x: (root.width - 300px) / 2;
+        y: 64px;
+        width: 300px;
+        height: card.preferred-height;
+        close-policy: close-on-click-outside;
+
+        card := ProfileCard {
+            profile: ChatData.profile;
+            link-clicked(url) => {
+                ChatData.open-link(url);
+            }
+            if ChatData.profile.can-chat || ChatData.profile.me: HorizontalLayout {
+                alignment: start;
+                padding-top: 6px;
+                if ChatData.profile.can-chat: Button {
+                    text: "Discuter";
+                    primary: true;
+                    clicked => {
+                        profile-popup.close();
+                        ChatData.open-direct(ChatData.profile.id);
+                    }
+                }
+                if ChatData.profile.me: Button {
+                    text: "Modifier mon profil";
+                    clicked => {
+                        profile-popup.close();
+                        ChatData.edit-profile();
+                    }
+                }
+            }
+        }
+    }
+
     property <bool> follow: true;
     property <int> scroll-request: ChatData.scroll-request;
 
@@ -1093,10 +1122,19 @@ component ConversationPane inherits Rectangle {
                         Avatar {
                             initials: ChatData.initials;
                             tint: ChatData.color;
+                            photo: ChatData.photo;
+                            has-photo: ChatData.has-photo;
                             size: 34px;
                             show-presence: !ChatData.is-group;
                             online: ChatData.online;
                             ring: Theme.chat-bg;
+                            TouchArea {
+                                enabled: !ChatData.is-group;
+                                mouse-cursor: ChatData.is-group ? MouseCursor.default : MouseCursor.pointer;
+                                clicked => {
+                                    ChatData.show-profile(ChatData.peer-id);
+                                }
+                            }
                         }
                     }
                     VerticalLayout {
@@ -1165,6 +1203,8 @@ component ConversationPane inherits Rectangle {
                         Avatar {
                             initials: ChatData.initials;
                             tint: ChatData.color;
+                            photo: ChatData.photo;
+                            has-photo: ChatData.has-photo;
                             size: 64px;
                         }
                     }

@@ -2,7 +2,9 @@
 //! La page « Discussions » est dans `ui_slint/chat.rs`.
 
 mod chat;
+mod images;
 mod markdown;
+mod profile;
 
 use crate::shared::{hotkey_labels, open_path, platform_label, reveal, setup_hotkeys, update_action, update_pending, update_texts};
 use magicplus_core::{util::format_size, Engine, Snapshot, TransferState};
@@ -137,6 +139,38 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
     }
 }
 
+/// Couleurs de bannière proposées (dans l'ordre de `banner-colors` de ui/app.slint).
+const BANNER_COLORS: [u32; 10] = [0xE5484D, 0xF76B15, 0xE2A300, 0x30A46C, 0x12A5B5, 0x3E7BFA, 0x8E4EC6, 0xD6409F, 0xA0714F, 0x8B8D98];
+
+/// Aperçu « Mon profil » (et les champs à la première fois).
+fn refresh_my_profile(ui: &AppWindow, engine: &Engine, first: bool) {
+    let mine = engine.my_profile();
+    ui.set_my_profile(profile::profile_item(&mine, false));
+    if first {
+        ui.set_profile_bio(mine.bio.clone().into());
+        ui.set_profile_pronouns(mine.pronouns.clone().into());
+        let index = mine.color.and_then(|c| BANNER_COLORS.iter().position(|rgb| *rgb == c)).map(|i| i as i32).unwrap_or(-1);
+        ui.set_profile_color_index(index);
+    }
+}
+
+fn choose_profile_image(engine: &Engine, kind: magicplus_core::ProfileImage) {
+    let title = match kind {
+        magicplus_core::ProfileImage::Avatar => "Photo de profil",
+        magicplus_core::ProfileImage::Banner => "Bannière du profil",
+    };
+    let picked = rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+        .pick_file();
+    if let Some(path) = picked {
+        match engine.set_profile_image(kind, &path) {
+            Ok(()) => engine.set_status("Profil mis à jour : il sera envoyé à vos contacts"),
+            Err(error) => engine.set_status(format!("Image refusée : {error}")),
+        }
+    }
+}
+
 pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
 
@@ -152,6 +186,44 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     refresh(&ui, &initial, true);
     ui.global::<MarkdownStyle>().set_mono(markdown::monospace_family().into());
     let chat: Rc<chat::Chat> = chat::Chat::new(engine.clone(), &ui);
+    refresh_my_profile(&ui, &engine, true);
+    let profiles_seen = Rc::new(std::cell::Cell::new(engine.profiles_revision()));
+    {
+        let engine = engine.clone();
+        ui.on_profile_choose_photo(move || choose_profile_image(&engine, magicplus_core::ProfileImage::Avatar));
+    }
+    {
+        let engine = engine.clone();
+        ui.on_profile_choose_banner(move || choose_profile_image(&engine, magicplus_core::ProfileImage::Banner));
+    }
+    {
+        let engine = engine.clone();
+        ui.on_profile_remove_photo(move || {
+            if let Err(error) = engine.remove_profile_image(magicplus_core::ProfileImage::Avatar) {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_profile_remove_banner(move || {
+            if let Err(error) = engine.remove_profile_image(magicplus_core::ProfileImage::Banner) {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        ui.on_profile_save(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let color = BANNER_COLORS.get(ui.get_profile_color_index().max(-1) as usize).copied().filter(|_| ui.get_profile_color_index() >= 0);
+            match engine.set_profile_details(&ui.get_profile_bio(), &ui.get_profile_pronouns(), color) {
+                Ok(()) => engine.set_status("Profil enregistré : il sera envoyé à vos contacts"),
+                Err(error) => engine.set_status(error.to_string()),
+            }
+        });
+    }
 
     // ---- actions de l'interface
     {
@@ -331,6 +403,13 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         let chat = chat.clone();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
             chat.tick();
+            let profiles = engine.profiles_revision();
+            if profiles != profiles_seen.get() {
+                profiles_seen.set(profiles);
+                if let Some(ui) = weak.upgrade() {
+                    refresh_my_profile(&ui, &engine, false);
+                }
+            }
             if engine.take_dirty() {
                 if let Some(ui) = weak.upgrade() {
                     let started = std::time::Instant::now();
@@ -374,6 +453,12 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
             ("discussion-2", Box::new(|ui, chat| {
                 ui.set_page(chat::CHAT_PAGE);
                 chat.select_index(1);
+            })),
+            ("profil", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(1);
+                let data = ui.global::<ChatData>();
+                data.invoke_show_profile(data.get_peer_id());
             })),
             ("discussion-clair", Box::new(|ui, chat| {
                 ui.invoke_apply_theme(false);

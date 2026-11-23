@@ -6,9 +6,10 @@ import { Theme } from "theme.slint";
 import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem } from "chat.slint";
 
 import { MarkdownStyle, BlockItem, TableRowItem, TableCellItem } from "markdown.slint";
+import { ProfileCard, ProfileItem } from "profile.slint";
 
 export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem }
-export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem }
+export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem }
 
 export struct PeerItem {
     id: string,
@@ -355,6 +356,13 @@ export component AppWindow inherits Window {
     in property <bool> update-has-page;
     in property <bool> update-pending;
     in-out property <bool> update-auto: true;
+    // Mon profil (Paramètres).
+    in property <ProfileItem> my-profile;
+    in-out property <string> profile-bio;
+    in-out property <string> profile-pronouns;
+    // -1 : couleur automatique, sinon index dans `banner-colors`.
+    in-out property <int> profile-color-index: -1;
+    out property <[color]> banner-colors: [#e5484d, #f76b15, #e2a300, #30a46c, #12a5b5, #3e7bfa, #8e4ec6, #d6409f, #a0714f, #8b8d98];
     in property <string> own-addresses;
 
     // ---- état de l'interface
@@ -391,6 +399,11 @@ export component AppWindow inherits Window {
     callback update-check();
     callback update-act();
     callback update-open-page();
+    callback profile-choose-photo();
+    callback profile-remove-photo();
+    callback profile-choose-banner();
+    callback profile-remove-banner();
+    callback profile-save();
 
     public function apply-theme(dark: bool) {
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
@@ -917,6 +930,142 @@ export component AppWindow inherits Window {
                                 color: Theme.text;
                                 font-size: 28px;
                                 font-weight: 600;
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Mon profil";
+                                }
+                                Subtle {
+                                    text: "Comme sur Discord : vos contacts (appareils associés et membres de vos groupes) voient votre photo, votre bannière et votre présentation.";
+                                }
+                                HorizontalLayout {
+                                    spacing: 20px;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: start;
+                                        ProfileCard {
+                                            profile: root.my-profile;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Button {
+                                                text: "Choisir une photo…";
+                                                clicked => {
+                                                    root.profile-choose-photo();
+                                                }
+                                            }
+                                            Button {
+                                                text: "Retirer";
+                                                enabled: root.my-profile.has-photo;
+                                                clicked => {
+                                                    root.profile-remove-photo();
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Button {
+                                                text: "Choisir une bannière…";
+                                                clicked => {
+                                                    root.profile-choose-banner();
+                                                }
+                                            }
+                                            Button {
+                                                text: "Retirer";
+                                                enabled: root.my-profile.has-banner;
+                                                clicked => {
+                                                    root.profile-remove-banner();
+                                                }
+                                            }
+                                        }
+                                        Subtle {
+                                            text: "PNG, JPEG, WebP ou GIF animé. La photo est recadrée en carré, la bannière en 5:2.";
+                                        }
+                                        Text {
+                                            text: "Couleur de la bannière (sans image)";
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Rectangle {
+                                                width: 24px;
+                                                height: 24px;
+                                                border-radius: 12px;
+                                                background: Theme.bubble;
+                                                border-width: root.profile-color-index == -1 ? 2px : 1px;
+                                                border-color: root.profile-color-index == -1 ? Theme.text : Theme.card-border;
+                                                Text {
+                                                    text: "A";
+                                                    color: Theme.subtle;
+                                                    font-size: 11px;
+                                                    width: parent.width;
+                                                    height: parent.height;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                TouchArea {
+                                                    clicked => {
+                                                        root.profile-color-index = -1;
+                                                    }
+                                                }
+                                            }
+                                            for swatch[i] in root.banner-colors: Rectangle {
+                                                width: 24px;
+                                                height: 24px;
+                                                border-radius: 12px;
+                                                background: swatch;
+                                                border-width: root.profile-color-index == i ? 2px : 0px;
+                                                border-color: Theme.text;
+                                                TouchArea {
+                                                    clicked => {
+                                                        root.profile-color-index = i;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            text: "Pronoms";
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                        }
+                                        LineEdit {
+                                            text <=> root.profile-pronouns;
+                                            placeholder-text: "ex. elle/elle, il/lui";
+                                            width: 320px;
+                                        }
+                                        Text {
+                                            text: "À propos de moi (Markdown, 190 caractères)";
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                        }
+                                        TextEdit {
+                                            text <=> root.profile-bio;
+                                            wrap: word-wrap;
+                                            width: 320px;
+                                            height: 80px;
+                                            placeholder-text: "Quelques mots sur vous… **gras**, *italique*, émojis 🙂";
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Enregistrer le profil";
+                                                primary: true;
+                                                clicked => {
+                                                    root.profile-save();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             Card {

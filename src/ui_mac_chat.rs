@@ -89,7 +89,11 @@ fn bubble(style: u8, top: f64, side: f64, mtm: MainThreadMarker) -> (Retained<Bu
     (view, inner)
 }
 
-fn avatar(name: &str, seed: &str, size: f64, mtm: MainThreadMarker) -> Retained<AvatarView> {
+/// Photo de profil ronde si l'appareil en a une, sinon pastille colorée avec les initiales.
+pub(super) fn avatar(name: &str, seed: &str, size: f64, photo: Option<&std::path::Path>, mtm: MainThreadMarker) -> Retained<NSView> {
+    if let Some(view) = photo.and_then(|path| super::profile_page::round_image(path, size, mtm)) {
+        return view;
+    }
     let ivars = ShapeIvars::default();
     ivars.hue.set(avatar_hue(seed) as f64);
     let view: Retained<AvatarView> = unsafe { msg_send![super(AvatarView::alloc(mtm).set_ivars(ivars)), init] };
@@ -103,7 +107,7 @@ fn avatar(name: &str, seed: &str, size: f64, mtm: MainThreadMarker) -> Retained<
     view.addSubview(&letters);
     letters.centerXAnchor().constraintEqualToAnchor(&view.centerXAnchor()).setActive(true);
     letters.centerYAnchor().constraintEqualToAnchor(&view.centerYAnchor()).setActive(true);
-    view
+    Retained::into_super(view)
 }
 
 // ------------------------------------------------------------------ état de la page
@@ -150,6 +154,8 @@ pub(super) struct ChatUi {
     last_refresh: Option<Instant>,
     /// Largeur de texte utilisée pour les bulles (refaites si la fenêtre change de taille).
     bubble_width: f64,
+    /// Appareils dont la photo est cliquable dans les messages (numéro = étiquette du bouton).
+    profile_ids: Vec<String>,
     current_conversation: Option<ConversationView>,
 }
 
@@ -524,7 +530,8 @@ impl Controller {
             let (row, inner) = bubble(if selected { 2 } else { 3 }, 7.0, 8.0, mtm);
             let line = stack(false, 10.0, mtm);
             let seed = conversation.members.iter().find(|m| !m.me).map(|m| m.id.clone()).unwrap_or_else(|| conversation.id.clone());
-            line.addArrangedSubview(&avatar(&conversation.title, if conversation.kind == ConversationKind::Group { &conversation.id } else { &seed }, 34.0, mtm));
+            let photo = (conversation.kind == ConversationKind::Direct).then(|| self.engine().profile(&seed)).flatten().and_then(|p| p.avatar);
+            line.addArrangedSubview(&avatar(&conversation.title, if conversation.kind == ConversationKind::Group { &conversation.id } else { &seed }, 34.0, photo.as_deref(), mtm));
             let texts = stack(true, 2.0, mtm);
             let prefix = match conversation.kind {
                 ConversationKind::Group => "👥 ",
@@ -583,6 +590,8 @@ impl Controller {
                 }
             })
             .collect();
+        // Une photo de profil changée refait les lignes.
+        let profiles_revision = self.engine().profiles_revision();
         let signatures: Vec<String> = messages
             .iter()
             .enumerate()
@@ -594,9 +603,10 @@ impl Controller {
                     .collect();
                 let reactions: String = m.reactions.iter().map(|r| format!("{}{}{}", r.emoji, r.count, r.mine)).collect();
                 format!(
-                    "{}|{}|{}|{}|{:?}|{}|{}|{}|{}",
+                    "{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
                     m.text, m.edited, m.deleted, reactions, m.status, attachments, headers[i], Some(i) == last_mine,
-                    m.reply.as_ref().map(|r| r.excerpt.as_str()).unwrap_or("")
+                    m.reply.as_ref().map(|r| r.excerpt.as_str()).unwrap_or(""),
+                    profiles_revision
                 )
             })
             .collect();
@@ -619,6 +629,7 @@ impl Controller {
             ui.rows.clear();
             ui.reaction_tags.clear();
             ui.attachment_paths.clear();
+            ui.profile_ids.clear();
         }
         for (index, message) in messages.iter().enumerate() {
             if index < ui.rows.len() {
@@ -676,7 +687,18 @@ impl Controller {
         row.setAlignment(NSLayoutAttribute::Top);
         row.setEdgeInsets(NSEdgeInsets { top: if header { 10.0 } else { 1.0 }, left: 0.0, bottom: 1.0, right: 0.0 });
         if header {
-            row.addArrangedSubview(&avatar(&message.author_name, &message.author_id, 36.0, mtm));
+            // Clic sur la photo : carte de profil.
+            let photo = self.engine().profile(&message.author_id).and_then(|p| p.avatar);
+            let picture = avatar(&message.author_name, &message.author_id, 36.0, photo.as_deref(), mtm);
+            let hit = button("", sel!(chatShowProfile:), self, mtm);
+            hit.setBordered(false);
+            hit.setTransparent(true);
+            hit.setTag(ui.profile_ids.len() as isize);
+            hit.setToolTip(Some(&ns(&format!("Profil de {}", message.author_name))));
+            ui.profile_ids.push(message.author_id.clone());
+            picture.addSubview(&hit);
+            pin(&hit, &picture, 0.0, 0.0, 0.0);
+            row.addArrangedSubview(&picture);
         } else {
             let gap = NSView::new(mtm);
             gap.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -847,6 +869,10 @@ impl Controller {
             }
         }
         menu
+    }
+
+    pub(super) fn chat_profile_id(&self, tag: isize) -> Option<String> {
+        self.ivars().chat.borrow().profile_ids.get(tag.max(0) as usize).cloned()
     }
 
     fn message_at(&self, index: isize) -> Option<MessageView> {

@@ -300,6 +300,45 @@ fn attachments_and_stickers_are_delivered() {
 }
 
 /// Données de démonstration pour regarder l'interface (pas un vrai test) :
+/// Profils : arrivent chez un appareil associé et chez un membre de groupe jamais associé ;
+/// une modification est rediffusée, une image retirée disparaît.
+#[test]
+fn profiles_reach_paired_devices_and_group_members() {
+    let nodes = start_nodes("profils", 3);
+    let (a, b, c) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine);
+    trust(a, b);
+    trust(a, c);
+    trust(b, a);
+    trust(c, a);
+    let group = a.create_group("Profils", &[id_of(b), id_of(c)]).unwrap();
+    wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
+
+    // B change son profil : A (associé) et C (seulement membre du groupe) le reçoivent.
+    let photo = nodes[1].dir.join("photo.png");
+    image::RgbImage::from_pixel(400, 300, image::Rgb([20, 120, 220])).save(&photo).unwrap();
+    b.set_profile_image(magicplus_core::ProfileImage::Avatar, &photo).unwrap();
+    b.set_profile_details("Fan de **randonnée** 🏔️", "il/lui", Some(0x3E7BFA)).unwrap();
+    for (engine, name) in [(a, "A"), (c, "C")] {
+        wait_for(&format!("{name} reçoit le profil de B"), Duration::from_secs(15), || {
+            engine.profile(&id_of(b)).is_some_and(|p| p.bio.contains("randonnée") && p.avatar.is_some())
+        });
+    }
+    let seen = c.profile(&id_of(b)).unwrap();
+    assert_eq!(seen.pronouns, "il/lui");
+    assert_eq!(seen.color, Some(0x3E7BFA));
+    assert_eq!(seen.name, "Machine B");
+    let avatar = image::open(seen.avatar.unwrap()).unwrap();
+    assert_eq!((avatar.width(), avatar.height()), (256, 256));
+
+    // Retrait de la photo : rediffusé aussi.
+    b.remove_profile_image(magicplus_core::ProfileImage::Avatar).unwrap();
+    wait_for("A voit la photo retirée", Duration::from_secs(15), || a.profile(&id_of(b)).is_some_and(|p| p.avatar.is_none()));
+    assert!(b.my_profile().avatar.is_none());
+    for node in &nodes {
+        node.engine.shutdown();
+    }
+}
+
 /// Message de démonstration qui utilise tout le Markdown pris en charge.
 const DEMO_MARKDOWN: &str = "## Programme du voyage
 -# mis à jour ce matin
@@ -357,6 +396,37 @@ fn donnees_de_demo() {
 
     let group = a.create_group("Projet Vacances", &[id_of(b), id_of(c)]).unwrap();
     wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
+
+    // Profils : photos et bannières dégradées, présentations en Markdown.
+    let gradient = |path: &Path, w: u32, h: u32, from: [u8; 3], to: [u8; 3]| {
+        let image = image::RgbImage::from_fn(w, h, |x, y| {
+            let t = (x + y) as f32 / (w + h) as f32;
+            image::Rgb([0, 1, 2].map(|i| (from[i] as f32 * (1.0 - t) + to[i] as f32 * t) as u8))
+        });
+        image.save(path).unwrap();
+    };
+    for (index, (node, bio, pronouns)) in [
+        (&nodes[0], "Développeur du dimanche 🦀\n**MagicPlus** sur tous mes appareils.", "il/lui"),
+        (&nodes[1], "Bureau de la maison · *toujours allumé*", ""),
+        (&nodes[2], "Voyages, photo et __randonnée__ 🏔️", "elle/elle"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let colors = [([88, 101, 242], [235, 69, 158]), ([46, 204, 113], [52, 152, 219]), ([241, 196, 15], [231, 76, 60])][index];
+        let photo = node.dir.join("photo.png");
+        let banner = node.dir.join("banniere.png");
+        gradient(&photo, 300, 300, colors.0, colors.1);
+        gradient(&banner, 1000, 400, colors.1, colors.0);
+        node.engine.set_profile_image(magicplus_core::ProfileImage::Avatar, &photo).unwrap();
+        if index != 1 {
+            node.engine.set_profile_image(magicplus_core::ProfileImage::Banner, &banner).unwrap();
+        }
+        node.engine.set_profile_details(bio, pronouns, Some(0x30A46C)).unwrap();
+    }
+    wait_for("profils reçus", Duration::from_secs(20), || {
+        [b, c].iter().all(|other| a.profile(&id_of(other)).is_some_and(|p| p.avatar.is_some()))
+    });
     c.send_chat(&group, "J'ai trouvé une location près de la mer 🌊", None, &[]).unwrap();
     thread::sleep(Duration::from_millis(400));
     b.send_chat(&group, "Top ! Combien de chambres ?", None, &[]).unwrap();

@@ -272,6 +272,8 @@ pub(crate) struct Inner {
     pub other_versions: Mutex<HashMap<String, OtherVersion>>,
     /// Mises à jour publiées sur GitHub (recherche, téléchargement).
     pub update: Mutex<crate::update::UpdateStatus>,
+    /// Profils : le nôtre et ceux des contacts.
+    pub profiles: Mutex<crate::profile::ProfileStore>,
     /// Tests : la coupure simulée n'a lieu qu'une fois.
     pub test_cut_done: AtomicBool,
     /// Discussions (conversations, journal d'événements, synchronisation).
@@ -310,6 +312,7 @@ impl Engine {
         };
         let secret = crypto::secret_from_b64(&identity.secret_key)?;
         let chat = ChatStore::load(store.dir().join("discussions"), &identity.id);
+        let profiles = crate::profile::ProfileStore::load(store.dir());
 
         let trusted: HashMap<String, TrustedPeer> = store
             .load::<Vec<TrustedPeer>>("trusted.json")
@@ -341,6 +344,7 @@ impl Engine {
                 manual_resolved: Mutex::default(),
                 other_versions: Mutex::default(),
                 update: Mutex::default(),
+                profiles: Mutex::new(profiles),
                 test_cut_done: AtomicBool::new(false),
                 chat: Mutex::new(chat),
                 dirty: AtomicBool::new(true),
@@ -353,6 +357,7 @@ impl Engine {
         engine.spawn_housekeeping();
         crate::transfer::spawn_scheduler(engine.inner.clone());
         crate::chat::spawn_chat_scheduler(engine.inner.clone());
+        crate::profile::spawn_profile_scheduler(engine.inner.clone());
         engine.spawn_update_checker();
         Ok(engine)
     }
@@ -1056,6 +1061,10 @@ impl Inner {
             }
             Message::ChatRead { conversation, lamport } => {
                 self.receive_chat_read(sender, &conversation, lamport)?;
+                Ok(Reply::None)
+            }
+            Message::Profile { profile } => {
+                self.receive_profile(sender, profile, body)?;
                 Ok(Reply::None)
             }
         }

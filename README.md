@@ -310,6 +310,25 @@ membre, par le même canal Noise que le reste.
 - **Limite** : pas de relais. Un message attend que son destinataire soit joignable **en même temps**
   que son auteur ; dans un groupe, chaque auteur livre lui-même ses messages à chaque membre.
 
+### Profils — `src/profile.rs`
+
+Comme sur Discord : photo de profil (fixe ou GIF animé), bannière (image ou couleur), pronoms et
+« À propos de moi » (Markdown, 190 caractères). Le nom affiché reste celui de l'appareil.
+
+- **Réglages** : Paramètres → Mon profil (aperçu de la carte, photo, bannière, couleur, pronoms,
+  présentation). Une image choisie est recadrée au centre et réduite (photo 256 × 256 en PNG,
+  bannière 960 × 384 en JPEG) ; un GIF assez léger (1,5 Mo photo, 2,4 Mo bannière) reste animé.
+- **Diffusion** : message `profile` (en-tête `ProfileInfo` : version, textes, couleur, et pour chaque
+  image son format, sa taille et son SHA-256 ; les octets des images suivent l'en-tête). Chaque
+  appareil l'envoie lui-même à ses **contacts** : appareils associés et membres de ses groupes
+  (joints grâce aux clés présentées par le créateur). Il retient la dernière version confirmée par
+  chacun (`profil/envois.json`) et renvoie à chaque changement, dès que le contact est joignable
+  (nouvel essai 30 s plus tard, 5 min après un refus).
+- **Réception** : seulement d'un contact prouvé par sa clé ; images vérifiées (taille, format, SHA-256,
+  décodables), rangées dans `profils/<id>/`. Une version plus ancienne est ignorée.
+- **Affichage** : photo ronde dans les messages, la liste des discussions et l'en-tête ; clic sur
+  une photo → carte de profil (bannière, photo, pronoms, présentation, « Discuter »).
+
 ### Versions et mises à jour — `src/update.rs`, `.github/workflows/`
 
 - **Publier** : une étiquette `vX.Y.Z` (annotée : son message devient les notes de version, affichées
@@ -350,6 +369,8 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `trusted.json` | appareils associés (id, nom, plateforme, clé publique) |
 | `settings.json` | dossier de réception, durée de reprise, copie automatique du texte reçu, thème (Slint), adresses saisies à la main, recherche des mises à jour |
 | `mise-a-jour/` | version téléchargée en attente d'installation (effacée au démarrage suivant) |
+| `profil/` | notre profil (`profil.json`, `avatar.*`, `banniere.*`) et les versions confirmées par chaque contact (`envois.json`) |
+| `profils/<id>/` | profils reçus des contacts |
 | `envois.json` | envois en attente ou à reprendre |
 | `partiels/` | fichiers en cours de réception (`<id>.part`) et leur description (`<id>.json`) |
 | `discussions/etat.json` | conversations : membres, compteurs envoyés/confirmés/appliqués, lectures |
@@ -368,6 +389,10 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/chat.rs` | Discussions et groupes : événements numérotés, synchronisation, lectures, autocollants. |
 | `src/markdown.rs` | Markdown des messages (analyse, texte brut, réécriture pour Slint). |
 | `src/update.rs` | Mises à jour : recherche sur GitHub, téléchargement vérifié, remplacement de l'app. |
+| `src/profile.rs` | Profils : images, diffusion aux contacts, réception. |
+| `src/highlight.rs` | Coloration des blocs de code. |
+| `src/ui_mac_markdown.rs`, `src/ui_mac_profile.rs` | Mac : affichage du Markdown, profils (photos, carte, réglages). |
+| `src/ui_slint/markdown.rs`, `profile.rs`, `images.rs` + `ui/markdown.slint`, `ui/profile.slint` | Windows : Markdown, profils, images de profil. |
 | `src/net.rs` | Annonces et écoute UDP, écoute TCP. |
 | `src/secure.rs` | Canal chiffré Noise (poignée de main, messages chiffrés). |
 | `src/protocol.rs` | Constantes (ports, tailles), `Hello`, `Message`, `Ack`. |

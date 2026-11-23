@@ -6,6 +6,7 @@ pub mod engine;
 pub mod highlight;
 pub mod markdown;
 mod net;
+pub mod profile;
 pub mod protocol;
 mod secure;
 pub mod store;
@@ -18,6 +19,7 @@ pub use chat::{
     StickerView,
 };
 pub use protocol::AttachmentKind;
+pub use profile::{ProfileImage, ProfileView};
 pub use update::{UpdateState, UpdateView};
 pub use engine::{
     ClipboardView, Config, Engine, IdentityView, ManualView, OtherVersionView, PeerView, ReceivedView, Snapshot,

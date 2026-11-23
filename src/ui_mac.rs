@@ -8,6 +8,8 @@
 mod chat_page;
 #[path = "ui_mac_markdown.rs"]
 mod markdown_view;
+#[path = "ui_mac_profile.rs"]
+mod profile_page;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -268,6 +270,12 @@ struct Widgets {
     clear_folder: Retained<NSButton>,
     resume_popup: Retained<NSPopUpButton>,
     auto_copy: Retained<NSButton>,
+    profile_preview: Retained<NSStackView>,
+    profile_bio: Retained<NSTextField>,
+    profile_pronouns: Retained<NSTextField>,
+    profile_color: Retained<NSPopUpButton>,
+    profile_remove_photo: Retained<NSButton>,
+    profile_remove_banner: Retained<NSButton>,
     update_text: Retained<NSTextField>,
     update_auto: Retained<NSButton>,
     update_check: Retained<NSButton>,
@@ -303,6 +311,10 @@ struct Ivars {
     current_page: Cell<usize>,
     chat: RefCell<ChatUi>,
     chat_widgets: OnceCell<ChatWidgets>,
+    /// Carte de profil ouverte et l'appareil qu'elle montre.
+    profile_popover: RefCell<Option<(Retained<objc2_app_kit::NSPopover>, String)>>,
+    /// Version des profils déjà affichée dans les réglages.
+    profile_revision: Cell<u64>,
 }
 
 define_class!(
@@ -334,6 +346,59 @@ define_class!(
         #[unsafe(method(chatOpenDirect:))]
         fn chat_open_direct_action(&self, sender: &AnyObject) {
             self.chat_open_direct(tag_of(sender));
+        }
+
+        // ---- profils (logique dans ui_mac_profile.rs)
+
+        #[unsafe(method(chatShowProfile:))]
+        fn chat_show_profile_action(&self, sender: &NSButton) {
+            let id = self.chat_profile_id(sender.tag());
+            if let Some(id) = id {
+                self.show_profile(&id, sender);
+            }
+        }
+
+        #[unsafe(method(profileDirect:))]
+        fn profile_direct_action(&self, _sender: &AnyObject) {
+            if let Some(id) = self.close_profile_popover() {
+                self.chat_with(&id);
+            }
+        }
+
+        #[unsafe(method(profileEdit:))]
+        fn profile_edit_action(&self, _sender: &AnyObject) {
+            self.close_profile_popover();
+            self.show_page(SETTINGS_PAGE);
+        }
+
+        #[unsafe(method(profileChoosePhoto:))]
+        fn profile_choose_photo(&self, _sender: &AnyObject) {
+            self.profile_choose(magicplus_core::ProfileImage::Avatar);
+            self.refresh_if_needed();
+        }
+
+        #[unsafe(method(profileRemovePhoto:))]
+        fn profile_remove_photo(&self, _sender: &AnyObject) {
+            self.profile_remove(magicplus_core::ProfileImage::Avatar);
+            self.refresh_if_needed();
+        }
+
+        #[unsafe(method(profileChooseBanner:))]
+        fn profile_choose_banner(&self, _sender: &AnyObject) {
+            self.profile_choose(magicplus_core::ProfileImage::Banner);
+            self.refresh_if_needed();
+        }
+
+        #[unsafe(method(profileRemoveBanner:))]
+        fn profile_remove_banner(&self, _sender: &AnyObject) {
+            self.profile_remove(magicplus_core::ProfileImage::Banner);
+            self.refresh_if_needed();
+        }
+
+        #[unsafe(method(profileSave:))]
+        fn profile_save_action(&self, _sender: &AnyObject) {
+            self.profile_save();
+            self.refresh_if_needed();
         }
 
         #[unsafe(method(chatWith:))]
@@ -860,6 +925,8 @@ impl Controller {
             widgets.auto_copy.setState(if snapshot.settings.auto_copy_received { NSControlStateValueOn } else { 0 });
             widgets.update_auto.setState(if snapshot.settings.auto_update { NSControlStateValueOn } else { 0 });
         }
+
+        self.refresh_profile_settings(first);
 
         // Mises à jour.
         let (text, action) = crate::shared::update_texts(&snapshot.update, snapshot.settings.auto_update);
@@ -1427,6 +1494,53 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
     // Paramètres
     let (settings, content) = page(mtm);
     page_title(&content, "Paramètres", None, mtm);
+
+    // Mon profil : aperçu à gauche, réglages à droite.
+    let profile_card_box = card_in(&content, Some("Mon profil"), mtm);
+    profile_card_box.addArrangedSubview(&secondary(
+        "Comme sur Discord : vos contacts (appareils associés et membres de vos groupes) voient votre photo, votre bannière et votre présentation.",
+        mtm,
+    ));
+    let profile_row = stack(false, 20.0, mtm);
+    profile_row.setAlignment(NSLayoutAttribute::Top);
+    let profile_preview = stack(true, 0.0, mtm);
+    profile_row.addArrangedSubview(&profile_preview);
+    let profile_form = stack(true, 8.0, mtm);
+    let photo_row = stack(false, 8.0, mtm);
+    photo_row.addArrangedSubview(&button("Choisir une photo…", sel!(profileChoosePhoto:), controller, mtm));
+    let profile_remove_photo = button("Retirer", sel!(profileRemovePhoto:), controller, mtm);
+    photo_row.addArrangedSubview(&profile_remove_photo);
+    profile_form.addArrangedSubview(&photo_row);
+    let banner_row = stack(false, 8.0, mtm);
+    banner_row.addArrangedSubview(&button("Choisir une bannière…", sel!(profileChooseBanner:), controller, mtm));
+    let profile_remove_banner = button("Retirer", sel!(profileRemoveBanner:), controller, mtm);
+    banner_row.addArrangedSubview(&profile_remove_banner);
+    profile_form.addArrangedSubview(&banner_row);
+    profile_form.addArrangedSubview(&secondary("PNG, JPEG, WebP ou GIF animé. La photo est recadrée en carré, la bannière en 5:2.", mtm));
+    let profile_color = NSPopUpButton::new(mtm);
+    profile_color.addItemWithTitle(&ns("Couleur de la bannière : automatique"));
+    for (name, _) in profile_page::BANNER_COLORS {
+        profile_color.addItemWithTitle(&ns(&format!("Couleur de la bannière : {}", name.to_lowercase())));
+    }
+    profile_form.addArrangedSubview(&profile_color);
+    profile_form.addArrangedSubview(&label("Pronoms", mtm));
+    let profile_pronouns = NSTextField::textFieldWithString(&ns(""), mtm);
+    profile_pronouns.setPlaceholderString(Some(&ns("ex. elle/elle, il/lui")));
+    profile_pronouns.setTranslatesAutoresizingMaskIntoConstraints(false);
+    profile_pronouns.widthAnchor().constraintEqualToConstant(320.0).setActive(true);
+    profile_form.addArrangedSubview(&profile_pronouns);
+    profile_form.addArrangedSubview(&label("À propos de moi (Markdown, 190 caractères)", mtm));
+    let profile_bio = NSTextField::textFieldWithString(&ns(""), mtm);
+    profile_bio.setPlaceholderString(Some(&ns("Quelques mots sur vous… **gras**, *italique*, émojis 🙂")));
+    profile_bio.setUsesSingleLineMode(false);
+    profile_bio.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByWordWrapping);
+    profile_bio.setTranslatesAutoresizingMaskIntoConstraints(false);
+    profile_bio.widthAnchor().constraintEqualToConstant(320.0).setActive(true);
+    profile_bio.heightAnchor().constraintEqualToConstant(64.0).setActive(true);
+    profile_form.addArrangedSubview(&profile_bio);
+    profile_form.addArrangedSubview(&button("Enregistrer le profil", sel!(profileSave:), controller, mtm));
+    profile_row.addArrangedSubview(&profile_form);
+    profile_card_box.addArrangedSubview(&profile_row);
     let device_card = card_in(&content, Some("Cet appareil"), mtm);
     device_card.addArrangedSubview(&secondary("Le nom affiché sur les autres appareils.", mtm));
     let name_field = NSTextField::textFieldWithString(&ns(""), mtm);
@@ -1579,6 +1693,12 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         clear_folder,
         resume_popup,
         auto_copy,
+        profile_preview,
+        profile_bio,
+        profile_pronouns,
+        profile_color,
+        profile_remove_photo,
+        profile_remove_banner,
         update_text,
         update_auto,
         update_check,

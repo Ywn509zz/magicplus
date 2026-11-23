@@ -22,7 +22,8 @@ const QUOTE_STEP: f64 = 14.0;
 
 #[derive(Default)]
 pub(super) struct FillIvars {
-    /// 0 : couleur fixe `rgb` ; 1 : gris discret du système ; 2 : contour seulement.
+    /// 0 : couleur fixe `rgb` ; 1 : gris discret du système ; 2 : contour seulement ;
+    /// 3 : couleur du fond de la fenêtre (anneau autour d'une photo) ; 4 : carte (fond + contour).
     mode: Cell<u8>,
     rgb: Cell<u32>,
     radius: Cell<f64>,
@@ -52,8 +53,19 @@ define_class!(
                     NSColor::separatorColor().setStroke();
                     path.stroke();
                 }
+                4 => {
+                    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(self.bounds(), radius, radius);
+                    NSColor::controlBackgroundColor().setFill();
+                    path.fill();
+                    NSColor::separatorColor().setStroke();
+                    path.stroke();
+                }
                 mode => {
-                    let color = if mode == 1 { NSColor::tertiaryLabelColor() } else { rgb_color(ivars.rgb.get()) };
+                    let color = match mode {
+                        1 => NSColor::tertiaryLabelColor(),
+                        3 => NSColor::windowBackgroundColor(),
+                        _ => rgb_color(ivars.rgb.get()),
+                    };
                     color.setFill();
                     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(self.bounds(), radius, radius).fill();
                 }

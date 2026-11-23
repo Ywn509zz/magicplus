@@ -1,6 +1,6 @@
 [package]
 name = "magicplus"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "MagicPlus : presse-papiers et transfert de fichiers chiffrés entre machines du réseau local."
 build = "build.rs"
@@ -43,6 +43,7 @@ slint = "1"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+objc2-quartz-core = "0.3"
 
 [features]
 # Développement : lance l'interface Windows (Slint) sur un Mac pour la regarder ou la photographier.

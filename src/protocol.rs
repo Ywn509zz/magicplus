@@ -97,6 +97,34 @@ pub enum Message {
         conversation: String,
         lamport: u64,
     },
+    /// Profil de l'expéditeur ; ses images (photo puis bannière) suivent l'en-tête.
+    Profile {
+        profile: ProfileInfo,
+    },
+}
+
+/// Image d'un profil, envoyée à la suite de l'en-tête.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInfo {
+    /// « png », « jpg » ou « gif ».
+    pub ext: String,
+    pub size: u64,
+    /// SHA-256 en base64.
+    pub sha: String,
+}
+
+/// Profil d'un appareil (le nom affiché reste celui de l'appareil).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProfileInfo {
+    /// Version (horodatage) : on ne garde que la plus récente.
+    pub revision: u64,
+    pub bio: String,
+    pub pronouns: String,
+    pub color: Option<u32>,
+    pub avatar: Option<ImageInfo>,
+    pub banner: Option<ImageInfo>,
 }
 
 /// Membre d'une conversation : sa clé est présentée par le créateur du groupe.

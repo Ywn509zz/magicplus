@@ -238,7 +238,7 @@ pub(crate) struct SenderInfo {
     pub trusted: bool,
 }
 
-fn valid_name(id: &str) -> bool {
+pub(crate) fn valid_name(id: &str) -> bool {
     !id.is_empty() && id.len() <= 80 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
@@ -409,6 +409,27 @@ impl ChatStore {
     /// Le membre `id` de cette conversation, s'il existe.
     fn member(&self, conversation: &str, id: &str) -> Option<MemberInfo> {
         self.conversations.get(conversation)?.meta.members.iter().find(|m| m.id == id).cloned()
+    }
+
+    /// Nom d'un membre de l'une de nos conversations.
+    pub(crate) fn member_name(&self, id: &str) -> Option<String> {
+        self.conversations.values().flat_map(|c| c.meta.members.iter()).find(|m| m.id == id).map(|m| m.name.clone())
+    }
+
+    /// Membres de nos groupes actifs (hors nous), avec un groupe qui permet de les joindre.
+    pub(crate) fn group_contacts(&self) -> Vec<(String, String)> {
+        let mut contacts: Vec<(String, String)> = Vec::new();
+        for state in self.conversations.values() {
+            if state.meta.kind != ConversationKind::Group || state.meta.closed {
+                continue;
+            }
+            for member in &state.meta.members {
+                if member.id != self.me && !contacts.iter().any(|(id, _)| id == &member.id) {
+                    contacts.push((member.id.clone(), state.meta.id.clone()));
+                }
+            }
+        }
+        contacts
     }
 
     /// Un membre (présenté dans un groupe) qui a prouvé cette clé.
