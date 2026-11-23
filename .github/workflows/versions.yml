@@ -1,0 +1,75 @@
+# Publie une version de MagicPlus quand on envoie une étiquette « vX.Y.Z » :
+# compile l'exécutable Windows et l'app macOS (Intel + Apple Silicon), calcule leurs empreintes
+# SHA-256 et crée la version GitHub. Les apps installées la trouvent seules (src/update.rs).
+#
+#   git tag -a v0.5.1 -m "Notes de version (affichées dans l'app)"
+#   git push origin v0.5.1
+
+name: Versions
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Compiler
+        run: cargo build --release --locked
+      - name: Préparer
+        run: Copy-Item target/release/magicplus.exe MagicPlus-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: MagicPlus-windows-x64.exe
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cibles Intel et Apple Silicon
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Compiler MagicPlus.app (universel)
+        run: MAGICPLUS_UNIVERSAL=1 packaging/macos/build-app.sh
+      - name: Préparer
+        run: ditto -c -k --keepParent target/release/MagicPlus.app MagicPlus-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: MagicPlus-macos.zip
+
+  publier:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Empreintes
+        working-directory: dist
+        run: sha256sum MagicPlus-windows-x64.exe MagicPlus-macos.zip > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Notes (message de l'étiquette)
+        run: |
+          git fetch --force --tags
+          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' > notes.md
+          [ -s notes.md ] || echo "MagicPlus ${GITHUB_REF_NAME#v}" > notes.md
+          cat notes.md
+      - name: Créer la version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "MagicPlus ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md

@@ -1,0 +1,1184 @@
+// Interface MagicPlus, dans l'esprit de Windows 11 (Fluent) :
+// navigation à gauche, fond « Mica », cartes arrondies, thème clair ou sombre.
+
+import { Button, Switch, LineEdit, ComboBox, CheckBox, ProgressIndicator, ScrollView, TextEdit, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem } from "chat.slint";
+
+export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem }
+
+export struct PeerItem {
+    id: string,
+    name: string,
+    platform: string,
+    address: string,
+    fingerprint: string,
+    trusted: bool,
+    online: bool,
+    key-changed: bool,
+    wants-pairing: bool,
+}
+
+export struct TransferItem {
+    id: string,
+    file-name: string,
+    details: string,
+    progress: float,
+    // 0 = en cours, 1 = terminé, 2 = échoué, 3 = en pause (reprise automatique)
+    state: int,
+    error: string,
+    sending: bool,
+}
+
+export struct ReceivedItem {
+    id: string,
+    file-name: string,
+    details: string,
+    saved: bool,
+    path: string,
+}
+
+export struct ManualItem {
+    address: string,
+    status: string,
+    // 0 = pas de réponse, 1 = MagicPlus trouvé, 2 = adresse introuvable
+    state: int,
+}
+
+component Card inherits Rectangle {
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    border-radius: 8px;
+    preferred-height: inner.preferred-height;
+    min-height: inner.min-height;
+
+    inner := VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        @children
+    }
+}
+
+component SectionTitle inherits Text {
+    color: Theme.text;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+component Subtle inherits Text {
+    color: Theme.subtle;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> tint;
+    height: 22px;
+    border-radius: 11px;
+    background: root.tint.with-alpha(0.16);
+    border-width: 1px;
+    border-color: root.tint.with-alpha(0.45);
+    min-width: label.preferred-width + 22px;
+    preferred-width: label.preferred-width + 22px;
+
+    label := Text {
+        text: root.text;
+        color: root.tint;
+        font-size: 12px;
+        font-weight: 600;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component IconBubble inherits Rectangle {
+    in property <image> icon;
+    in property <color> tint: Theme.accent;
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    background: Theme.bubble;
+
+    Image {
+        source: root.icon;
+        colorize: root.tint;
+        width: 20px;
+        height: 20px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> selected;
+    in property <int> badge;
+    callback clicked;
+    height: 40px;
+    border-radius: 6px;
+    background: root.selected ? Theme.nav-selected : touch.has-hover ? Theme.nav-hover : transparent;
+
+    Rectangle {
+        x: 0px;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: 2px;
+        background: Theme.accent;
+        visible: root.selected;
+    }
+
+    Image {
+        source: root.icon;
+        colorize: root.selected ? Theme.accent : Theme.text;
+        width: 18px;
+        height: 18px;
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+    }
+
+    if root.badge > 0: Rectangle {
+        x: parent.width - self.width - 10px;
+        y: (parent.height - self.height) / 2;
+        height: 20px;
+        width: Math.max(20px, count.preferred-width + 12px);
+        border-radius: 10px;
+        background: Theme.badge;
+        count := Text {
+            text: root.badge > 99 ? "99+" : root.badge;
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 46px;
+        width: parent.width - 52px - (root.badge > 0 ? 36px : 0px);
+        height: parent.height;
+        text: root.label;
+        color: Theme.text;
+        font-size: 14px;
+        font-weight: root.selected ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component PeerCard inherits Card {
+    in property <PeerItem> peer;
+    callback pair(PeerItem);
+    callback forget(string);
+    callback chat(string);
+
+    HorizontalLayout {
+        spacing: 14px;
+
+        IconBubble {
+            icon: @image-url("icons/laptop.svg");
+            tint: root.peer.online ? Theme.accent : Theme.neutral;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.peer.name;
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.peer.platform + (root.peer.address != "" ? "  ·  " + root.peer.address : "");
+                color: Theme.subtle;
+                font-size: 12px;
+                overflow: elide;
+            }
+            Text {
+                text: "Empreinte  " + root.peer.fingerprint;
+                color: Theme.subtle;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            Pill {
+                text: root.peer.key-changed ? "Clé modifiée" : root.peer.trusted ? (root.peer.online ? "Associé · en ligne" : "Associé · hors ligne") : root.peer.wants-pairing ? "Demande d'association" : "Détecté";
+                tint: root.peer.key-changed ? Theme.danger : root.peer.trusted ? (root.peer.online ? Theme.success : Theme.neutral) : root.peer.wants-pairing ? Theme.warning : Theme.accent;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            if root.peer.trusted: HorizontalLayout {
+                spacing: 8px;
+                Button {
+                    text: "Discuter";
+                    clicked => {
+                        root.chat(root.peer.id);
+                    }
+                }
+                Button {
+                    text: "Oublier";
+                    clicked => {
+                        root.forget(root.peer.id);
+                    }
+                }
+            }
+            if !root.peer.trusted: Button {
+                text: root.peer.key-changed ? "Associer à nouveau" : "Associer";
+                primary: !root.peer.key-changed;
+                enabled: root.peer.online;
+                clicked => {
+                    root.pair(root.peer);
+                }
+            }
+        }
+    }
+}
+
+component TransferCard inherits Card {
+    in property <TransferItem> item;
+    callback cancel(string);
+
+    HorizontalLayout {
+        spacing: 14px;
+
+        IconBubble {
+            icon: root.item.sending ? @image-url("icons/upload.svg") : @image-url("icons/download.svg");
+            tint: root.item.state == 2 ? Theme.danger : root.item.state == 1 ? Theme.success : root.item.state == 3 ? Theme.warning : Theme.accent;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 4px;
+            Text {
+                text: root.item.file-name;
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.state == 2 ? root.item.error : root.item.state == 3 ? root.item.details + "  ·  " + root.item.error : root.item.details;
+                color: root.item.state == 2 ? Theme.danger : root.item.state == 3 ? Theme.warning : Theme.subtle;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            if root.item.state == 0: ProgressIndicator {
+                progress: root.item.progress;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            Pill {
+                text: root.item.state == 2 ? "Échec" : root.item.state == 1 ? "Terminé" : root.item.state == 3 ? "En pause · " + round(root.item.progress * 100) + " %" : round(root.item.progress * 100) + " %";
+                tint: root.item.state == 2 ? Theme.danger : root.item.state == 1 ? Theme.success : root.item.state == 3 ? Theme.warning : Theme.accent;
+            }
+        }
+
+        if root.item.state == 0 || root.item.state == 3: VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            Button {
+                text: "Annuler";
+                clicked => {
+                    root.cancel(root.item.id);
+                }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "MagicPlus";
+    icon: @image-url("icons/shield.svg");
+    preferred-width: 1040px;
+    preferred-height: 700px;
+    min-width: 820px;
+    min-height: 560px;
+    background: Theme.mica;
+    default-font-size: 14px;
+
+    // ---- données (remplies par Rust)
+    in property <[PeerItem]> peers;
+    in property <[TransferItem]> transfers;
+    in property <[ReceivedItem]> received;
+    in property <string> device-name;
+    in property <string> device-platform;
+    in property <string> device-fingerprint;
+    in property <string> status;
+    in property <bool> has-clip;
+    in property <string> clip-from;
+    in property <string> clip-text;
+    in property <string> save-folder;
+    in property <string> receive-folder;
+    in property <string> hotkey-send;
+    in property <string> hotkey-paste;
+    in property <int> joinable-count;
+    in property <int> paired-count;
+    in property <string> version;
+    in property <[ManualItem]> manual;
+    // Appareils d'une autre version de MagicPlus (ils s'ignorent mutuellement) : explications.
+    in property <[string]> version-warnings;
+    // Mises à jour : description, bouton d'action (vide : caché), recherche en cours, page web.
+    in property <string> update-text;
+    in property <string> update-action;
+    in property <bool> update-busy;
+    in property <bool> update-has-page;
+    in property <bool> update-pending;
+    in-out property <bool> update-auto: true;
+    in property <string> own-addresses;
+
+    // ---- état de l'interface
+    in-out property <int> page: 0;
+    in-out property <string> local-text;
+    in-out property <string> name-edit;
+    in-out property <string> address-edit;
+    in-out property <int> resume-index: 4;
+    in-out property <bool> auto-copy: true;
+    in-out property <bool> pairing-open: false;
+    in-out property <PeerItem> pairing-peer;
+
+    // ---- actions (traitées par Rust)
+    callback trust(string);
+    callback forget(string);
+    callback send-clipboard();
+    callback paste-received();
+    callback read-clipboard() -> string;
+    callback copy-text(string);
+    callback send-files();
+    callback choose-folder();
+    callback clear-folder();
+    callback save-name(string);
+    callback resume-changed(int);
+    callback auto-copy-changed(bool);
+    callback cancel-transfer(string);
+    callback open-path(string);
+    callback remove-received(string);
+    callback theme-changed(bool);
+    callback add-address(string);
+    callback remove-address(string);
+    callback chat-with(string);
+    callback update-auto-changed(bool);
+    callback update-check();
+    callback update-act();
+    callback update-open-page();
+
+    public function apply-theme(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    VerticalLayout {
+        HorizontalLayout {
+            // ------------------------------------------------ navigation
+            Rectangle {
+                width: 232px;
+                background: Theme.nav;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        height: 56px;
+                        padding-left: 6px;
+                        spacing: 10px;
+                        alignment: start;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            y: 12px;
+                            border-radius: 8px;
+                            background: Theme.accent;
+                            Image {
+                                source: @image-url("icons/shield.svg");
+                                colorize: Theme.dark ? #000000 : #ffffff;
+                                width: 20px;
+                                height: 20px;
+                                x: 6px;
+                                y: 6px;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "MagicPlus";
+                                color: Theme.text;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+                        }
+                    }
+
+                    NavItem {
+                        icon: @image-url("icons/laptop.svg");
+                        label: "Appareils";
+                        selected: root.page == 0;
+                        clicked => {
+                            root.page = 0;
+                        }
+                    }
+                    NavItem {
+                        icon: @image-url("icons/chat.svg");
+                        label: "Discussions";
+                        selected: root.page == 4;
+                        badge: ChatData.unread;
+                        clicked => {
+                            root.page = 4;
+                        }
+                    }
+                    NavItem {
+                        icon: @image-url("icons/clipboard.svg");
+                        label: "Presse-papiers";
+                        selected: root.page == 1;
+                        clicked => {
+                            root.page = 1;
+                        }
+                    }
+                    NavItem {
+                        icon: @image-url("icons/transfer.svg");
+                        label: "Transferts";
+                        selected: root.page == 2;
+                        clicked => {
+                            root.page = 2;
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+
+                    NavItem {
+                        icon: @image-url("icons/settings.svg");
+                        label: "Paramètres";
+                        badge: root.update-pending ? 1 : 0;
+                        selected: root.page == 3;
+                        clicked => {
+                            root.page = 3;
+                        }
+                    }
+                }
+            }
+
+            // ------------------------------------------------ contenu
+            if root.page == 4: ChatPage {
+                horizontal-stretch: 1;
+            }
+
+            if root.page != 4: ScrollView {
+                horizontal-stretch: 1;
+
+                HorizontalLayout {
+                    padding-left: 36px;
+                    padding-right: 36px;
+                    padding-top: 28px;
+                    padding-bottom: 28px;
+                    alignment: stretch;
+
+                    VerticalLayout {
+                        spacing: 12px;
+                        max-width: 900px;
+                        alignment: start;
+
+                        // ======== Appareils
+                        if root.page == 0: VerticalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Appareils";
+                                color: Theme.text;
+                                font-size: 28px;
+                                font-weight: 600;
+                            }
+                            Subtle {
+                                text: "Les appareils qui exécutent MagicPlus sur le même réseau Wi-Fi ou Ethernet apparaissent ici automatiquement, sans Internet.";
+                            }
+
+                            Card {
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    IconBubble {
+                                        icon: @image-url("icons/shield.svg");
+                                        tint: Theme.success;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        Text {
+                                            text: root.device-name + "  (cet appareil)";
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: root.device-platform + "  ·  Empreinte  " + root.device-fingerprint;
+                                            color: Theme.subtle;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+
+                            SectionTitle {
+                                text: "À proximité (" + root.peers.length + ")";
+                            }
+
+                            for warning in root.version-warnings: Card {
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    IconBubble {
+                                        icon: @image-url("icons/warning.svg");
+                                        tint: Theme.warning;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 4px;
+                                        Text {
+                                            text: "Autre version de MagicPlus";
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+                                        Subtle {
+                                            text: warning;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.peers.length == 0: Card {
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    IconBubble {
+                                        icon: @image-url("icons/wifi.svg");
+                                        tint: Theme.neutral;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 4px;
+                                        Text {
+                                            text: "Aucun appareil MagicPlus détecté";
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+                                        Subtle {
+                                            text: "Ouvrez MagicPlus sur l'autre machine, branchée au même réseau privé. Sous Windows, autorisez MagicPlus dans le pare-feu (réseaux privés) quand Windows le demande.";
+                                        }
+                                    }
+                                }
+                            }
+
+                            for peer in root.peers: PeerCard {
+                                peer: peer;
+                                pair(p) => {
+                                    root.pairing-peer = p;
+                                    root.pairing-open = true;
+                                }
+                                forget(id) => {
+                                    root.forget(id);
+                                }
+                                chat(id) => {
+                                    root.chat-with(id);
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Connexion par adresse IP";
+                                }
+                                Subtle {
+                                    text: "Si l'autre appareil n'apparaît pas tout seul (réseau d'entreprise ou d'école, Wi-Fi invité, autre sous-réseau), saisissez son adresse IP : MagicPlus l'appellera directement. Il suffit de le faire sur une des deux machines.";
+                                }
+                                Text {
+                                    text: root.own-addresses;
+                                    color: Theme.text;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    LineEdit {
+                                        text <=> root.address-edit;
+                                        placeholder-text: "ex. 192.168.1.20";
+                                        width: 260px;
+                                        accepted(value) => {
+                                            root.add-address(value);
+                                        }
+                                    }
+                                    Button {
+                                        text: "Ajouter";
+                                        enabled: root.address-edit != "";
+                                        clicked => {
+                                            root.add-address(root.address-edit);
+                                        }
+                                    }
+                                }
+                                for item in root.manual: HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        text: item.address;
+                                        color: Theme.text;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: item.status;
+                                        color: item.state == 1 ? Theme.success : item.state == 2 ? Theme.warning : Theme.subtle;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Button {
+                                        text: "Retirer";
+                                        clicked => {
+                                            root.remove-address(item.address);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ======== Presse-papiers
+                        if root.page == 1: VerticalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Presse-papiers";
+                                color: Theme.text;
+                                font-size: 28px;
+                                font-weight: 600;
+                            }
+                            Subtle {
+                                text: "Envoyez le texte copié vers vos appareils associés. Tout est chiffré de bout en bout.";
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Envoyer";
+                                }
+                                Subtle {
+                                    text: root.joinable-count == 0 ? "Aucun appareil associé n'est joignable pour le moment." : root.joinable-count + " appareil(s) associé(s) joignable(s)";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Button {
+                                        text: "Envoyer le presse-papiers";
+                                        primary: true;
+                                        enabled: root.joinable-count > 0;
+                                        clicked => {
+                                            root.send-clipboard();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Copier le dernier texte reçu";
+                                        enabled: root.has-clip;
+                                        clicked => {
+                                            root.paste-received();
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Presse-papiers de cet appareil";
+                                }
+                                TextEdit {
+                                    text <=> root.local-text;
+                                    wrap: word-wrap;
+                                    height: 110px;
+                                    placeholder-text: "Cliquez sur « Lire le presse-papiers » pour afficher son contenu.";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Button {
+                                        text: "Lire le presse-papiers";
+                                        clicked => {
+                                            root.local-text = root.read-clipboard();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Copier ce texte";
+                                        enabled: root.local-text != "";
+                                        clicked => {
+                                            root.copy-text(root.local-text);
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: root.has-clip ? "Dernier texte reçu de " + root.clip-from : "Dernier texte reçu";
+                                }
+                                if !root.has-clip: Subtle {
+                                    text: "Rien reçu pour l'instant.";
+                                }
+                                if root.has-clip: TextEdit {
+                                    text: root.clip-text;
+                                    read-only: true;
+                                    wrap: word-wrap;
+                                    height: 110px;
+                                }
+                                if root.has-clip: HorizontalLayout {
+                                    alignment: start;
+                                    Button {
+                                        text: "Copier dans le presse-papiers";
+                                        clicked => {
+                                            root.copy-text(root.clip-text);
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Raccourcis globaux";
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Rectangle {
+                                        background: Theme.bubble;
+                                        border-radius: 6px;
+                                        preferred-height: 52px;
+                                        VerticalLayout {
+                                            padding: 10px;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Copier et envoyer";
+                                                color: Theme.text;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                            }
+                                            Text {
+                                                text: root.hotkey-send;
+                                                color: Theme.subtle;
+                                                font-size: 12px;
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        background: Theme.bubble;
+                                        border-radius: 6px;
+                                        preferred-height: 52px;
+                                        VerticalLayout {
+                                            padding: 10px;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Copier le dernier texte reçu";
+                                                color: Theme.text;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                            }
+                                            Text {
+                                                text: root.hotkey-paste;
+                                                color: Theme.subtle;
+                                                font-size: 12px;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ======== Transferts
+                        if root.page == 2: VerticalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Transferts";
+                                color: Theme.text;
+                                font-size: 28px;
+                                font-weight: 600;
+                            }
+                            Subtle {
+                                text: "Les fichiers passent directement d'un appareil à l'autre par le réseau local, chiffrés, avec vérification d'intégrité.";
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Envoyer des fichiers";
+                                }
+                                Subtle {
+                                    text: root.joinable-count == 0 ? "Aucun appareil associé n'est joignable pour le moment." : "Destination : " + root.joinable-count + " appareil(s) associé(s) joignable(s)";
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    Button {
+                                        text: "Choisir des fichiers…";
+                                        primary: true;
+                                        enabled: root.joinable-count > 0;
+                                        clicked => {
+                                            root.send-files();
+                                        }
+                                    }
+                                }
+                            }
+
+                            SectionTitle {
+                                text: "Récents";
+                            }
+                            if root.transfers.length == 0: Subtle {
+                                text: "Aucun transfert pour l'instant.";
+                            }
+                            for item in root.transfers: TransferCard {
+                                item: item;
+                                cancel(id) => {
+                                    root.cancel-transfer(id);
+                                }
+                            }
+
+                            if root.received.length > 0: SectionTitle {
+                                text: "Fichiers reçus";
+                            }
+                            for file in root.received: Card {
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    IconBubble {
+                                        icon: @image-url("icons/file.svg");
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        Text {
+                                            text: file.file-name;
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: file.details;
+                                            color: Theme.subtle;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Button {
+                                                text: "Afficher";
+                                                clicked => {
+                                                    root.open-path(file.path);
+                                                }
+                                            }
+                                            Button {
+                                                text: "Retirer";
+                                                clicked => {
+                                                    root.remove-received(file.id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ======== Paramètres
+                        if root.page == 3: VerticalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Paramètres";
+                                color: Theme.text;
+                                font-size: 28px;
+                                font-weight: 600;
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Apparence";
+                                }
+                                Switch {
+                                    text: "Thème sombre";
+                                    checked: Theme.dark;
+                                    toggled => {
+                                        Palette.color-scheme = self.checked ? ColorScheme.dark : ColorScheme.light;
+                                        root.theme-changed(self.checked);
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Cet appareil";
+                                }
+                                Subtle {
+                                    text: "Le nom affiché sur les autres appareils.";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        text <=> root.name-edit;
+                                        horizontal-stretch: 1;
+                                        accepted(value) => {
+                                            root.save-name(value);
+                                        }
+                                    }
+                                    Button {
+                                        text: "Enregistrer";
+                                        enabled: root.name-edit != "" && root.name-edit != root.device-name;
+                                        clicked => {
+                                            root.save-name(root.name-edit);
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Réception des fichiers";
+                                }
+                                Subtle {
+                                    text: (root.save-folder == "" ? "Dossier de réception (par défaut) :  " : "Dossier de réception :  ") + root.receive-folder;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Button {
+                                        text: "Choisir un dossier…";
+                                        clicked => {
+                                            root.choose-folder();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Ne plus utiliser de dossier";
+                                        enabled: root.save-folder != "";
+                                        clicked => {
+                                            root.clear-folder();
+                                        }
+                                    }
+                                }
+                                Subtle {
+                                    text: "Les fichiers arrivent par petits morceaux dans un dossier caché, puis sont rangés ici une fois complets et vérifiés. Un transfert interrompu (Wi-Fi coupé, ordinateur en veille ou éteint) reprend tout seul là où il s'était arrêté.";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text {
+                                        text: "Reprise possible pendant :";
+                                        color: Theme.text;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                    ComboBox {
+                                        model: ["1 heure", "6 heures", "12 heures", "24 heures", "48 heures", "3 jours", "7 jours"];
+                                        current-index <=> root.resume-index;
+                                        width: 160px;
+                                        selected(value) => {
+                                            root.resume-changed(self.current-index);
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Presse-papiers";
+                                }
+                                CheckBox {
+                                    text: "Mettre automatiquement le texte reçu dans le presse-papiers";
+                                    checked <=> root.auto-copy;
+                                    toggled => {
+                                        root.auto-copy-changed(self.checked);
+                                    }
+                                }
+                                Subtle {
+                                    text: "Activé : copiez sur l'autre appareil (ou Ctrl + Shift + Alt + C), puis collez directement ici.";
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Mises à jour";
+                                }
+                                Text {
+                                    text: root.update-text;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+                                CheckBox {
+                                    text: "Chercher automatiquement les nouvelles versions (seul usage d'Internet)";
+                                    checked <=> root.update-auto;
+                                    toggled => {
+                                        root.update-auto-changed(self.checked);
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    if root.update-action != "": Button {
+                                        text: root.update-action;
+                                        primary: true;
+                                        clicked => {
+                                            root.update-act();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Rechercher maintenant";
+                                        enabled: !root.update-busy;
+                                        clicked => {
+                                            root.update-check();
+                                        }
+                                    }
+                                    if root.update-has-page: Button {
+                                        text: "Page de la version";
+                                        clicked => {
+                                            root.update-open-page();
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "À propos";
+                                }
+                                Subtle {
+                                    text: "MagicPlus " + root.version + "  ·  Aucun serveur, aucun compte : tout reste sur votre réseau local. Découverte UDP 45454, transferts TCP 45455.";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------ barre d'état
+        Rectangle {
+            height: 30px;
+            background: Theme.nav;
+            border-width: 0px;
+
+            Rectangle {
+                height: 1px;
+                y: 0px;
+                background: Theme.card-border;
+            }
+            Text {
+                x: 16px;
+                width: parent.width - 240px;
+                height: parent.height;
+                text: root.status;
+                color: Theme.subtle;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: parent.width - 220px;
+                width: 204px;
+                height: parent.height;
+                text: root.paired-count + " appareil(s) associé(s)";
+                color: Theme.subtle;
+                font-size: 12px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // ------------------------------------------------ boîte de dialogue d'association
+    if root.pairing-open: Rectangle {
+        background: #00000099;
+
+        TouchArea { }
+
+        Card {
+            width: min(480px, parent.width - 48px);
+            height: self.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.dark ? #2d2d2d : #ffffff;
+
+            Text {
+                text: root.pairing-peer.key-changed ? "Associer à nouveau « " + root.pairing-peer.name + " » ?" : "Associer « " + root.pairing-peer.name + " » ?";
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            if root.pairing-peer.key-changed: Text {
+                text: "Attention : cet appareil avait déjà été associé mais annonce maintenant une autre clé. Ne continuez que si vous avez réinstallé MagicPlus sur cette machine.";
+                color: Theme.danger;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            Subtle {
+                text: "Vérifiez que cette empreinte est strictement identique à celle affichée sur l'autre appareil (page Appareils, ligne « cet appareil »). Sinon, quelqu'un d'autre se fait passer pour lui.";
+            }
+            Rectangle {
+                background: Theme.bubble;
+                border-radius: 6px;
+                height: 52px;
+                Text {
+                    text: root.pairing-peer.fingerprint;
+                    color: Theme.text;
+                    font-size: 20px;
+                    font-weight: 600;
+                    font-family: "Menlo";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Annuler";
+                    clicked => {
+                        root.pairing-open = false;
+                    }
+                }
+                Button {
+                    text: "L'empreinte est identique : associer";
+                    primary: true;
+                    clicked => {
+                        root.pairing-open = false;
+                        root.trust(root.pairing-peer.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ boîtes de dialogue des discussions
+    if ChatData.dialog != 0: ChatDialog {
+        width: parent.width;
+        height: parent.height;
+    }
+}

@@ -1,0 +1,1500 @@
+// Page « Discussions » de l'interface Slint (Windows), dans l'esprit de Discord :
+// conversations à gauche ; à droite, messages groupés par auteur (avatar, nom, heure),
+// bulles en Markdown, réponses, réactions, modification, pièces jointes, GIF animés,
+// autocollants, accusés de lecture et « en train d'écrire ». Rien ne dépend d'Internet.
+// Les données viennent de Rust (src/ui_slint/chat.rs) par le global `ChatData`.
+
+import { Button, LineEdit, CheckBox, ScrollView, TextEdit, ProgressIndicator } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export struct ConversationItem {
+    id: string,
+    title: string,
+    preview: string,
+    unread: int,
+    group: bool,
+    online: bool,
+    typing: bool,
+    selected: bool,
+    initials: string,
+    color: color,
+}
+
+export struct ReactionItem {
+    emoji: string,
+    count: int,
+    mine: bool,
+    names: string,
+}
+
+export struct AttachmentItem {
+    // 0 = image affichée, 1 = fichier à ouvrir, 2 = en attente ou en cours de réception, 3 = image en chargement
+    kind: int,
+    name: string,
+    label: string,
+    path: string,
+    image: image,
+    frames: [image],
+    frame-ms: int,
+    width: length,
+    height: length,
+    progress: float,
+}
+
+export struct MessageItem {
+    id: string,
+    author: string,
+    initials: string,
+    color: color,
+    mine: bool,
+    system: bool,
+    header: bool,
+    time: string,
+    text: styled-text,
+    has-text: bool,
+    deleted: bool,
+    edited: bool,
+    jumbo: bool,
+    reply: string,
+    attachments: [AttachmentItem],
+    reactions: [ReactionItem],
+    status: string,
+}
+
+export struct ChoiceItem {
+    id: string,
+    name: string,
+    checked: bool,
+}
+
+export struct StickerItem {
+    id: string,
+    image: image,
+    frames: [image],
+    frame-ms: int,
+}
+
+export struct MemberItem {
+    name: string,
+    state: string,
+}
+
+export global ChatData {
+    // ---- liste des conversations
+    in property <[ConversationItem]> conversations;
+    in property <int> unread;
+    in property <[ChoiceItem]> direct-choices;
+
+    // ---- conversation affichée
+    in property <bool> has-conversation;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> initials;
+    in property <color> color;
+    in property <bool> is-group;
+    in property <bool> online;
+    in property <bool> is-creator;
+    in property <bool> closed;
+    in property <bool> history-start;
+    in property <[MessageItem]> messages;
+    in property <[MemberItem]> members;
+    in property <string> typing;
+
+    // ---- zone de saisie
+    in-out property <string> draft;
+    in property <string> banner;
+    in property <[string]> pending;
+    in property <int> pending-more;
+    in property <[StickerItem]> stickers;
+
+    // ---- demandes de Rust à l'interface
+    in-out property <int> scroll-request;
+    in-out property <int> focus-request;
+    // Animation des GIF : avance de 1 toutes les 50 ms.
+    in property <int> tick;
+
+    // ---- boîtes de dialogue : 0 aucune, 1 nouveau groupe, 2 ajouter des membres, 3 renommer,
+    // 4 supprimer un message, 5 quitter le groupe
+    in-out property <int> dialog;
+    in property <string> dialog-title;
+    in property <string> dialog-text;
+    in property <string> dialog-error;
+    in-out property <string> dialog-name;
+    in property <[ChoiceItem]> choices;
+
+    callback select(int);
+    callback send();
+    callback typing-changed();
+    callback paste-media() -> bool;
+    callback cancel-banner() -> bool;
+    callback edit-last() -> bool;
+    callback message-action(int, string);
+    callback toggle-reaction(int, string);
+    callback open-path(string);
+    callback open-link(string);
+    callback attach();
+    callback remove-pending(int);
+    callback open-direct(string);
+    callback new-group();
+    callback add-members();
+    callback rename();
+    callback leave();
+    callback toggle-choice(int, bool);
+    callback dialog-accepted();
+    callback send-sticker(string);
+    callback add-sticker();
+    callback remove-sticker(string);
+}
+
+// ------------------------------------------------------------------ petits éléments
+
+component Avatar inherits Rectangle {
+    in property <string> initials;
+    in property <color> tint;
+    in property <length> size: 38px;
+    in property <bool> show-presence;
+    in property <bool> online;
+    in property <color> ring: Theme.list-bg;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: root.tint;
+
+    Text {
+        text: root.initials;
+        color: #ffffff;
+        font-size: root.size * 0.38;
+        font-weight: 600;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    if root.show-presence: Rectangle {
+        width: root.size * 0.36;
+        height: self.width;
+        x: parent.width - self.width + 1px;
+        y: parent.height - self.height + 1px;
+        border-radius: self.width / 2;
+        background: root.online ? Theme.success : Theme.neutral;
+        border-width: 2.5px;
+        border-color: root.ring;
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> size: 34px;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    in property <color> tint: Theme.subtle;
+    callback clicked;
+    width: root.size;
+    height: root.size;
+    border-radius: 6px;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.nav-selected : touch.has-hover || root.active ? Theme.nav-hover : transparent;
+    opacity: root.enabled ? 1 : 0.4;
+
+    Image {
+        source: root.icon;
+        colorize: (touch.has-hover || root.active) && root.enabled ? Theme.text : root.tint;
+        width: root.size * 0.56;
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component EmojiButton inherits Rectangle {
+    in property <string> emoji;
+    in property <length> size: 30px;
+    callback clicked;
+    width: root.size;
+    height: root.size;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.nav-selected : touch.has-hover ? Theme.nav-hover : transparent;
+
+    Text {
+        text: root.emoji;
+        font-size: root.size * 0.56;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.card-border;
+}
+
+component ConversationRow inherits Rectangle {
+    in property <ConversationItem> item;
+    callback clicked;
+    height: 58px;
+    border-radius: 6px;
+    background: root.item.selected ? Theme.nav-selected : touch.has-hover ? Theme.nav-hover : transparent;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 10px;
+
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                initials: root.item.initials;
+                tint: root.item.color;
+                size: 38px;
+                show-presence: !root.item.group;
+                online: root.item.online;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.item.title;
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: root.item.unread > 0 ? 700 : 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.typing ? "écrit…" : root.item.preview;
+                color: root.item.typing ? Theme.accent : root.item.unread > 0 ? Theme.text : Theme.subtle;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+
+        if root.item.unread > 0: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 20px;
+                min-width: 20px;
+                preferred-width: count.preferred-width + 12px;
+                border-radius: 10px;
+                background: Theme.badge;
+                count := Text {
+                    text: root.item.unread > 99 ? "99+" : root.item.unread;
+                    color: #ffffff;
+                    font-size: 11px;
+                    font-weight: 700;
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component ReactionPill inherits Rectangle {
+    in property <ReactionItem> reaction;
+    callback clicked;
+    height: 26px;
+    min-width: label.preferred-width + 18px;
+    preferred-width: label.preferred-width + 18px;
+    border-radius: 8px;
+    background: root.reaction.mine ? Theme.accent.with-alpha(0.16) : Theme.bubble;
+    border-width: 1px;
+    border-color: root.reaction.mine ? Theme.accent : touch.has-hover ? Theme.card-border : transparent;
+
+    label := Text {
+        text: root.reaction.emoji + " " + root.reaction.count;
+        color: root.reaction.mine ? Theme.accent : Theme.text;
+        font-size: 13px;
+        font-weight: 600;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Une image animée (GIF) ou fixe : `frames` contient les images d'un GIF, `image` la première.
+component AnimatedImage inherits Image {
+    in property <image> still;
+    in property <[image]> frames;
+    in property <int> frame-ms: 100;
+    source: root.frames.length > 1 ? root.frames[Math.mod(Math.floor(ChatData.tick * 50 / Math.max(root.frame-ms, 20)), root.frames.length)] : root.still;
+    image-fit: contain;
+}
+
+component FileCard inherits Rectangle {
+    in property <AttachmentItem> item;
+    callback open(string);
+    width: 320px;
+    height: 56px;
+    border-radius: 8px;
+    background: Theme.card;
+    border-width: 1px;
+    border-color: touch.has-hover && root.item.kind == 1 ? Theme.accent : Theme.card-border;
+
+    touch := TouchArea {
+        enabled: root.item.kind == 1;
+        mouse-cursor: root.item.kind == 1 ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.open(root.item.path);
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: root.item.kind == 2 ? @image-url("icons/download.svg") : @image-url("icons/file.svg");
+                colorize: root.item.kind == 2 ? Theme.neutral : Theme.accent;
+                width: 26px;
+                height: 26px;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.item.name;
+                color: root.item.kind == 1 ? Theme.accent : Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.label;
+                color: Theme.subtle;
+                font-size: 11px;
+                overflow: elide;
+            }
+            if root.item.kind == 2 && root.item.progress > 0: ProgressIndicator {
+                progress: root.item.progress;
+                height: 4px;
+            }
+        }
+    }
+}
+
+component PendingChip inherits Rectangle {
+    in property <string> name;
+    callback remove;
+    height: 30px;
+    border-radius: 6px;
+    background: Theme.card;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    preferred-width: chip.preferred-width;
+    max-width: 220px;
+
+    chip := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 2px;
+        spacing: 6px;
+        Image {
+            source: @image-url("icons/attach.svg");
+            colorize: Theme.subtle;
+            width: 14px;
+            y: 8px;
+            height: 14px;
+        }
+        Text {
+            text: root.name;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: @image-url("icons/close.svg");
+                size: 24px;
+                clicked => {
+                    root.remove();
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ messages
+
+component SystemRow inherits Rectangle {
+    in property <MessageItem> message;
+    preferred-height: 34px;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        alignment: center;
+        Text {
+            text: "— " + root.message.author + "  ·  " + root.message.time + " —";
+            color: Theme.subtle;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component MessageRow inherits Rectangle {
+    in property <MessageItem> message;
+    in property <int> index;
+    in property <bool> can-act;
+    in property <length> bubble-max: 520px;
+    preferred-height: body.preferred-height;
+    min-height: body.min-height;
+    background: hover.has-hover ? Theme.row-hover : transparent;
+
+    hover := TouchArea {
+        menu := ContextMenuArea {
+            enabled: !root.message.deleted;
+            Menu {
+                if root.can-act: MenuItem {
+                    title: "Répondre";
+                    activated => {
+                        ChatData.message-action(root.index, "reply");
+                    }
+                }
+                if root.can-act: Menu {
+                    title: "Réagir";
+                    MenuItem {
+                        title: "👍";
+                        activated => {
+                            ChatData.message-action(root.index, "react:👍");
+                        }
+                    }
+                    MenuItem {
+                        title: "❤️";
+                        activated => {
+                            ChatData.message-action(root.index, "react:❤️");
+                        }
+                    }
+                    MenuItem {
+                        title: "😂";
+                        activated => {
+                            ChatData.message-action(root.index, "react:😂");
+                        }
+                    }
+                    MenuItem {
+                        title: "😮";
+                        activated => {
+                            ChatData.message-action(root.index, "react:😮");
+                        }
+                    }
+                    MenuItem {
+                        title: "😢";
+                        activated => {
+                            ChatData.message-action(root.index, "react:😢");
+                        }
+                    }
+                    MenuItem {
+                        title: "🎉";
+                        activated => {
+                            ChatData.message-action(root.index, "react:🎉");
+                        }
+                    }
+                }
+                if root.message.has-text: MenuItem {
+                    title: "Copier le texte";
+                    activated => {
+                        ChatData.message-action(root.index, "copy");
+                    }
+                }
+                if root.message.mine && root.can-act && root.message.has-text: MenuItem {
+                    title: "Modifier";
+                    activated => {
+                        ChatData.message-action(root.index, "edit");
+                    }
+                }
+                if root.message.mine && root.can-act: MenuItem {
+                    title: "Supprimer pour tout le monde";
+                    activated => {
+                        ChatData.message-action(root.index, "delete");
+                    }
+                }
+            }
+
+            body := HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 24px;
+                padding-top: root.message.header ? 12px : 2px;
+                padding-bottom: 2px;
+                spacing: 14px;
+
+                if root.message.header: VerticalLayout {
+                    alignment: start;
+                    Avatar {
+                        initials: root.message.initials;
+                        tint: root.message.color;
+                        size: 38px;
+                    }
+                }
+                if !root.message.header: Rectangle {
+                    width: 38px;
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+
+                    if root.message.reply != "": HorizontalLayout {
+                        spacing: 6px;
+                        Image {
+                            source: @image-url("icons/reply.svg");
+                            colorize: Theme.subtle;
+                            width: 14px;
+                            height: 14px;
+                            y: 2px;
+                        }
+                        Text {
+                            text: root.message.reply;
+                            color: Theme.subtle;
+                            font-size: 12px;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    if root.message.header: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: root.message.author;
+                            color: root.message.mine ? Theme.accent : Theme.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: root.message.time;
+                            color: Theme.subtle;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    if root.message.deleted || root.message.has-text: HorizontalLayout {
+                        alignment: start;
+                        Rectangle {
+                            max-width: root.bubble-max;
+                            preferred-width: bubble.preferred-width;
+                            preferred-height: bubble.preferred-height;
+                            min-height: bubble.min-height;
+                            border-radius: 14px;
+                            background: root.message.jumbo && !root.message.deleted ? transparent : root.message.mine ? Theme.mine-bubble : Theme.bubble;
+
+                            bubble := VerticalLayout {
+                                padding-left: root.message.jumbo ? 2px : 12px;
+                                padding-right: root.message.jumbo ? 2px : 12px;
+                                padding-top: 7px;
+                                padding-bottom: 7px;
+                                spacing: 2px;
+
+                                if root.message.deleted: Text {
+                                    text: "Message supprimé";
+                                    color: Theme.subtle;
+                                    font-size: 13px;
+                                    font-italic: true;
+                                }
+                                if !root.message.deleted: StyledText {
+                                    text: root.message.text;
+                                    default-color: Theme.text;
+                                    default-font-size: root.message.jumbo ? 34px : 14px;
+                                    link-color: Theme.accent;
+                                    selectable: true;
+                                    link-clicked(url) => {
+                                        ChatData.open-link(url);
+                                    }
+                                }
+                                if root.message.edited && !root.message.deleted: Text {
+                                    text: "(modifié)";
+                                    color: Theme.subtle;
+                                    font-size: 10px;
+                                }
+                            }
+                        }
+                    }
+
+                    for item in root.message.attachments: HorizontalLayout {
+                        alignment: start;
+                        if item.kind == 0: Rectangle {
+                            width: item.width;
+                            height: item.height;
+                            border-radius: 8px;
+                            clip: true;
+                            AnimatedImage {
+                                still: item.image;
+                                frames: item.frames;
+                                frame-ms: item.frame-ms;
+                                width: parent.width;
+                                height: parent.height;
+                            }
+                            TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    ChatData.open-path(item.path);
+                                }
+                            }
+                        }
+                        if item.kind == 3: Rectangle {
+                            width: item.width;
+                            height: item.height;
+                            border-radius: 8px;
+                            background: Theme.bubble;
+                            Text {
+                                text: "Chargement…";
+                                color: Theme.subtle;
+                                font-size: 12px;
+                                width: parent.width;
+                                height: parent.height;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if item.kind == 1 || item.kind == 2: FileCard {
+                            item: item;
+                            open(path) => {
+                                ChatData.open-path(path);
+                            }
+                        }
+                    }
+
+                    if root.message.reactions.length > 0: HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+                        for reaction in root.message.reactions: ReactionPill {
+                            reaction: reaction;
+                            clicked => {
+                                if root.can-act {
+                                    ChatData.toggle-reaction(root.index, reaction.emoji);
+                                }
+                            }
+                        }
+                    }
+
+                    if root.message.status != "": Text {
+                        text: root.message.status;
+                        color: Theme.subtle;
+                        font-size: 11px;
+                    }
+                }
+            }
+        }
+
+        // Barre d'actions au survol, comme sur Discord.
+        if hover.has-hover && root.can-act && !root.message.deleted: Rectangle {
+            x: parent.width - self.width - 18px;
+            y: root.message.header ? 4px : -6px;
+            width: tools.preferred-width;
+            height: 34px;
+            border-radius: 8px;
+            background: Theme.popup;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #0000002a;
+
+            tools := HorizontalLayout {
+                padding: 2px;
+                EmojiButton {
+                    emoji: "👍";
+                    clicked => {
+                        ChatData.message-action(root.index, "react:👍");
+                    }
+                }
+                EmojiButton {
+                    emoji: "❤️";
+                    clicked => {
+                        ChatData.message-action(root.index, "react:❤️");
+                    }
+                }
+                EmojiButton {
+                    emoji: "😂";
+                    clicked => {
+                        ChatData.message-action(root.index, "react:😂");
+                    }
+                }
+                IconButton {
+                    icon: @image-url("icons/reply.svg");
+                    size: 30px;
+                    clicked => {
+                        ChatData.message-action(root.index, "reply");
+                    }
+                }
+                if root.message.mine && root.message.has-text: IconButton {
+                    icon: @image-url("icons/edit.svg");
+                    size: 30px;
+                    clicked => {
+                        ChatData.message-action(root.index, "edit");
+                    }
+                }
+                IconButton {
+                    icon: @image-url("icons/more.svg");
+                    size: 30px;
+                    clicked => {
+                        menu.show({ x: hover.width - 200px, y: self.y + 34px });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ page
+
+// Zone de saisie : pièce jointe, texte (Entrée envoie, Maj+Entrée va à la ligne, Ctrl+V colle
+// aussi les images et les fichiers), émojis, autocollants, envoi.
+component Composer inherits Rectangle {
+    property <int> focus-request: ChatData.focus-request;
+    property <[string]> emojis: [
+        "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣",
+        "😊", "😇", "🙂", "😉", "😍", "🥰", "😘", "😋",
+        "😜", "🤪", "😎", "🤩", "🥳", "😏", "😴", "🤔",
+        "🤗", "🤭", "😬", "🙄", "😮", "😢", "😭", "😡",
+        "👍", "👎", "👏", "🙌", "🙏", "💪", "👋", "🤝",
+        "❤️", "🧡", "💛", "💚", "💙", "💜", "🔥", "✨",
+        "🎉", "🎂", "☕", "🍕", "⚽", "🎮", "🎵", "📎",
+        "✅", "❌", "⚠️", "💡", "⏰", "📌", "🚀", "👀"
+    ];
+    // Hauteur du texte saisi, mesurée par un Text invisible (la zone grandit jusqu'à 6 lignes).
+    property <length> composer-height: Math.clamp(measure.preferred-height + 20px, 40px, 150px);
+    preferred-height: layout.preferred-height;
+    min-height: layout.min-height;
+
+    changed focus-request => {
+        input.focus();
+    }
+
+    layout := HorizontalLayout {
+        spacing: 4px;
+
+        VerticalLayout {
+            alignment: end;
+            padding-bottom: 3px;
+            IconButton {
+                icon: @image-url("icons/attach.svg");
+                clicked => {
+                    ChatData.attach();
+                }
+            }
+        }
+
+        keys := FocusScope {
+            horizontal-stretch: 1;
+            height: root.composer-height;
+            focus-on-click: false;
+            capture-key-pressed(event) => {
+                if event.text == Key.Return && !event.modifiers.shift {
+                    ChatData.send();
+                    return accept;
+                }
+                if event.text == Key.Escape {
+                    if ChatData.cancel-banner() {
+                        return accept;
+                    }
+                    return reject;
+                }
+                if event.text == Key.UpArrow && ChatData.draft == "" {
+                    if ChatData.edit-last() {
+                        return accept;
+                    }
+                    return reject;
+                }
+                if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") {
+                    if ChatData.paste-media() {
+                        return accept;
+                    }
+                }
+                return reject;
+            }
+
+            input := TextEdit {
+                width: parent.width;
+                height: parent.height;
+                text <=> ChatData.draft;
+                wrap: word-wrap;
+                font-size: 14px;
+                placeholder-text: "Message à " + ChatData.title;
+                edited(text) => {
+                    ChatData.typing-changed();
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: end;
+            padding-bottom: 3px;
+            HorizontalLayout {
+                spacing: 2px;
+                emoji-button := IconButton {
+                    icon: @image-url("icons/emoji.svg");
+                    active: emoji-popup.is-open;
+                    clicked => {
+                        emoji-popup.show();
+                    }
+                }
+                IconButton {
+                    icon: @image-url("icons/sticker.svg");
+                    active: sticker-popup.is-open;
+                    clicked => {
+                        sticker-popup.show();
+                    }
+                }
+                IconButton {
+                    icon: @image-url("icons/send.svg");
+                    tint: Theme.accent;
+                    enabled: ChatData.draft != "" || ChatData.pending.length > 0;
+                    clicked => {
+                        ChatData.send();
+                        input.focus();
+                    }
+                }
+            }
+        }
+    }
+
+    // Mesure invisible de la hauteur du texte saisi.
+    measure := Text {
+        x: -10000px;
+        width: Math.max(100px, keys.width - 28px);
+        text: ChatData.draft + " ";
+        font-size: 14px;
+        wrap: word-wrap;
+        opacity: 0;
+    }
+
+    // ------------------------------------------------ fenêtres surgissantes
+    emoji-popup := PopupWindow {
+        x: root.width - self.width;
+        y: -self.height - 8px;
+        width: 8 * 38px + 16px;
+        height: 8 * 38px + 16px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.popup;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+
+            for emoji[i] in root.emojis: EmojiButton {
+                x: 8px + Math.mod(i, 8) * 38px;
+                y: 8px + Math.floor(i / 8) * 38px;
+                size: 38px;
+                emoji: emoji;
+                clicked => {
+                    ChatData.draft += emoji;
+                }
+            }
+        }
+    }
+
+    sticker-popup := PopupWindow {
+        x: root.width - self.width;
+        y: -self.height - 8px;
+        width: 4 * 84px + 24px;
+        height: 380px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.popup;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.card-border;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "Autocollants et GIF";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "Créer…";
+                        clicked => {
+                            ChatData.add-sticker();
+                        }
+                    }
+                }
+                if ChatData.stickers.length == 0: Text {
+                    text: "Aucun autocollant pour l'instant. « Créer… » transforme une image en autocollant, ou ajoute un GIF animé à votre bibliothèque.";
+                    color: Theme.subtle;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    Rectangle {
+                        height: Math.ceil(ChatData.stickers.length / 4) * 84px;
+                        for sticker[i] in ChatData.stickers: Rectangle {
+                            x: Math.mod(i, 4) * 84px;
+                            y: Math.floor(i / 4) * 84px;
+                            width: 80px;
+                            height: 80px;
+                            border-radius: 8px;
+                            background: cell.has-hover ? Theme.nav-hover : transparent;
+                            cell := TouchArea {
+                                clicked => {
+                                    ChatData.send-sticker(sticker.id);
+                                    sticker-popup.close();
+                                }
+                            }
+                            AnimatedImage {
+                                x: 6px;
+                                y: 6px;
+                                width: 68px;
+                                height: 68px;
+                                still: sticker.image;
+                                frames: sticker.frames;
+                                frame-ms: sticker.frame-ms;
+                            }
+                            if cell.has-hover: Rectangle {
+                                x: parent.width - 24px;
+                                y: 2px;
+                                width: 22px;
+                                height: 22px;
+                                border-radius: 11px;
+                                background: Theme.popup;
+                                border-width: 1px;
+                                border-color: Theme.card-border;
+                                Image {
+                                    source: @image-url("icons/close.svg");
+                                    colorize: Theme.subtle;
+                                    width: 12px;
+                                    height: 12px;
+                                    x: 5px;
+                                    y: 5px;
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        ChatData.remove-sticker(sticker.id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "Clic : envoyer  ·  ✕ : retirer de la bibliothèque";
+                    color: Theme.subtle;
+                    font-size: 11px;
+                }
+            }
+        }
+    }
+}
+
+// Conversation affichée : en-tête, messages, zone de saisie et fenêtres surgissantes.
+component ConversationPane inherits Rectangle {
+    property <bool> follow: true;
+    property <int> scroll-request: ChatData.scroll-request;
+
+    changed scroll-request => {
+        root.follow = true;
+        messages-view.content-y = Math.min(0px, messages-view.visible-height - messages-view.content-height);
+    }
+
+    VerticalLayout {
+
+        // ---- en-tête
+        Rectangle {
+            height: 60px;
+            group-menu := ContextMenuArea {
+                enabled: ChatData.is-group;
+                Menu {
+                    if ChatData.is-creator && !ChatData.closed: MenuItem {
+                        title: "Ajouter des membres…";
+                        activated => {
+                            ChatData.add-members();
+                        }
+                    }
+                    if ChatData.is-creator && !ChatData.closed: MenuItem {
+                        title: "Renommer le groupe…";
+                        activated => {
+                            ChatData.rename();
+                        }
+                    }
+                    if ChatData.is-creator && !ChatData.closed: MenuSeparator { }
+                    for member in ChatData.members: MenuItem {
+                        title: member.name + " — " + member.state;
+                        enabled: false;
+                    }
+                    if !ChatData.closed: MenuSeparator { }
+                    if !ChatData.closed: MenuItem {
+                        title: "Quitter le groupe";
+                        activated => {
+                            ChatData.leave();
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 14px;
+                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: center;
+                        Avatar {
+                            initials: ChatData.initials;
+                            tint: ChatData.color;
+                            size: 34px;
+                            show-presence: !ChatData.is-group;
+                            online: ChatData.online;
+                            ring: Theme.chat-bg;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 1px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: ChatData.title;
+                            color: Theme.text;
+                            font-size: 16px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: ChatData.subtitle;
+                            color: Theme.subtle;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                    }
+                    if ChatData.is-group: VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            icon: @image-url("icons/people.svg");
+                            clicked => {
+                                group-menu.show({ x: self.x - 220px, y: 52px });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Divider { }
+
+        // ---- messages
+        messages-view := ScrollView {
+            vertical-stretch: 1;
+            changed content-height => {
+                if root.follow {
+                    self.content-y = Math.min(0px, self.visible-height - self.content-height);
+                }
+            }
+            changed visible-height => {
+                if root.follow {
+                    self.content-y = Math.min(0px, self.visible-height - self.content-height);
+                }
+            }
+            scrolled => {
+                root.follow = self.content-y <= self.visible-height - self.content-height + 48px;
+            }
+
+            VerticalLayout {
+                padding-top: 8px;
+                padding-bottom: 14px;
+                alignment: start;
+
+                if ChatData.history-start: VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 18px;
+                    padding-bottom: 10px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        alignment: start;
+                        Avatar {
+                            initials: ChatData.initials;
+                            tint: ChatData.color;
+                            size: 64px;
+                        }
+                    }
+                    Text {
+                        text: ChatData.is-group ? "Bienvenue dans « " + ChatData.title + " »" : "Début de votre discussion avec " + ChatData.title;
+                        color: Theme.text;
+                        font-size: 22px;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "Messages chiffrés de bout en bout, directement entre vos appareils : aucun serveur, aucun Internet.";
+                        color: Theme.subtle;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                for message[i] in ChatData.messages: VerticalLayout {
+                    if message.system: SystemRow {
+                        message: message;
+                    }
+                    if !message.system: MessageRow {
+                        message: message;
+                        index: i;
+                        can-act: !ChatData.closed;
+                        bubble-max: Math.min(560px, messages-view.visible-width - 140px);
+                    }
+                }
+            }
+        }
+
+        // ---- saisie
+        VerticalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-bottom: 4px;
+            spacing: 6px;
+
+            if ChatData.banner != "": Rectangle {
+                height: 34px;
+                border-radius: 8px;
+                background: Theme.bubble;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 4px;
+                    spacing: 8px;
+                    Text {
+                        text: ChatData.banner;
+                        color: Theme.subtle;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            icon: @image-url("icons/close.svg");
+                            size: 26px;
+                            clicked => {
+                                if ChatData.cancel-banner() {
+                                    ChatData.focus-request += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if ChatData.pending.length > 0: HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                for name[i] in ChatData.pending: PendingChip {
+                    name: name;
+                    remove => {
+                        ChatData.remove-pending(i);
+                    }
+                }
+                if ChatData.pending-more > 0: Text {
+                    text: "+ " + ChatData.pending-more + " autre(s)";
+                    color: Theme.subtle;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+
+            if ChatData.closed: Rectangle {
+                height: 44px;
+                border-radius: 8px;
+                background: Theme.bubble;
+                Text {
+                    text: "Vous avez quitté ce groupe : l'historique reste consultable ici, en lecture seule.";
+                    color: Theme.subtle;
+                    font-size: 13px;
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            if !ChatData.closed: Composer { }
+
+            Text {
+                height: 16px;
+                text: ChatData.typing;
+                color: Theme.subtle;
+                font-size: 11px;
+                font-italic: true;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+
+
+export component ChatPage inherits Rectangle {
+    background: Theme.chat-bg;
+
+    HorizontalLayout {
+        // ------------------------------------------------ liste des conversations
+        Rectangle {
+            width: 280px;
+            background: Theme.list-bg;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 60px;
+                    new-menu := ContextMenuArea {
+                        Menu {
+                            MenuItem {
+                                title: "Nouveau groupe…";
+                                activated => {
+                                    ChatData.new-group();
+                                }
+                            }
+                            MenuSeparator { }
+                            if ChatData.direct-choices.length == 0: MenuItem {
+                                title: "Associez d'abord un appareil (page Appareils)";
+                                enabled: false;
+                            }
+                            for choice in ChatData.direct-choices: MenuItem {
+                                title: "Discuter avec " + choice.name;
+                                activated => {
+                                    ChatData.open-direct(choice.id);
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            Text {
+                                text: "Discussions";
+                                color: Theme.text;
+                                font-size: 20px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                new-button := IconButton {
+                                    icon: @image-url("icons/plus.svg");
+                                    clicked => {
+                                        new-menu.show({ x: 280px - 230px, y: 50px });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Divider { }
+
+                if ChatData.conversations.length == 0: VerticalLayout {
+                    padding: 18px;
+                    spacing: 6px;
+                    Text {
+                        text: "Aucune discussion";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "Cliquez sur + pour écrire à un appareil associé ou créer un groupe.";
+                        color: Theme.subtle;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 2px;
+                        alignment: start;
+                        for conversation[i] in ChatData.conversations: ConversationRow {
+                            item: conversation;
+                            clicked => {
+                                ChatData.select(i);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.card-border;
+            }
+        }
+
+        // ------------------------------------------------ conversation
+        if !ChatData.has-conversation: VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            padding: 40px;
+            spacing: 10px;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 72px;
+                    height: 72px;
+                    border-radius: 36px;
+                    background: Theme.bubble;
+                    Image {
+                        source: @image-url("icons/chat.svg");
+                        colorize: Theme.accent;
+                        width: 36px;
+                        height: 36px;
+                        x: 18px;
+                        y: 18px;
+                    }
+                }
+            }
+            Text {
+                text: "Vos discussions restent sur votre réseau";
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Messages chiffrés de bout en bout, sans serveur ni Internet. Associez un appareil dans la page Appareils, puis cliquez sur + pour lui écrire ou créer un groupe.";
+                color: Theme.subtle;
+                font-size: 13px;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+        }
+
+        if ChatData.has-conversation: ConversationPane {
+            horizontal-stretch: 1;
+        }
+    }
+
+}
+
+// ------------------------------------------------------------------ boîte de dialogue
+
+export component ChatDialog inherits Rectangle {
+    background: #00000099;
+
+    TouchArea { }
+
+    Rectangle {
+        width: Math.min(460px, parent.width - 48px);
+        height: content.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.dark ? #2d2d2d : #ffffff;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000050;
+
+        content := VerticalLayout {
+            padding: 22px;
+            spacing: 12px;
+
+            Text {
+                text: ChatData.dialog-title;
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            if ChatData.dialog-text != "": Text {
+                text: ChatData.dialog-text;
+                color: Theme.subtle;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            if ChatData.dialog == 1 || ChatData.dialog == 3: LineEdit {
+                text <=> ChatData.dialog-name;
+                placeholder-text: "Nom du groupe";
+                accepted => {
+                    ChatData.dialog-accepted();
+                }
+            }
+            if ChatData.dialog == 1 || ChatData.dialog == 2: VerticalLayout {
+                spacing: 2px;
+                for choice[i] in ChatData.choices: CheckBox {
+                    text: choice.name;
+                    checked: choice.checked;
+                    toggled => {
+                        ChatData.toggle-choice(i, self.checked);
+                    }
+                }
+            }
+            if ChatData.dialog-error != "": Text {
+                text: ChatData.dialog-error;
+                color: Theme.danger;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Annuler";
+                    clicked => {
+                        ChatData.dialog = 0;
+                    }
+                }
+                Button {
+                    text: ChatData.dialog == 1 ? "Créer le groupe" : ChatData.dialog == 2 ? "Ajouter" : ChatData.dialog == 3 ? "Renommer" : ChatData.dialog == 4 ? "Supprimer" : "Quitter le groupe";
+                    primary: true;
+                    clicked => {
+                        ChatData.dialog-accepted();
+                    }
+                }
+            }
+        }
+    }
+}

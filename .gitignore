@@ -1,0 +1,5 @@
+# Compilation
+/target/
+# macOS
+.DS_Store
+._*
