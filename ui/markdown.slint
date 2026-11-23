@@ -1,0 +1,181 @@
+// Affichage du Markdown (messages et canevas) : une suite de blocs « à plat » préparés par Rust
+// (src/ui_slint/markdown.rs) — paragraphes, titres, listes, citations, code coloré, tableaux.
+
+import { Theme } from "theme.slint";
+
+export struct TableCellItem {
+    text: styled-text,
+    // 0 gauche, 1 centre, 2 droite
+    align: int,
+}
+
+export struct TableRowItem {
+    cells: [TableCellItem],
+    header: bool,
+}
+
+export struct BlockItem {
+    // 0 texte, 1 titre, 2 petit texte, 3 code, 4 tableau, 5 séparateur
+    kind: int,
+    level: int,
+    text: styled-text,
+    marker: string,
+    indent: int,
+    quote: int,
+    language: string,
+    rows: [TableRowItem],
+    columns: int,
+}
+
+export global MarkdownStyle {
+    // Police à chasse fixe du système (choisie par Rust).
+    in property <string> mono: "Consolas";
+}
+
+component BlockView inherits Rectangle {
+    in property <BlockItem> block;
+    in property <length> font-size: 14px;
+    callback link-clicked(string);
+    preferred-height: row.preferred-height;
+    min-height: row.min-height;
+    preferred-width: row.preferred-width;
+    min-width: row.min-width;
+
+    row := HorizontalLayout {
+        for level in root.block.quote: HorizontalLayout {
+            width: 14px;
+            alignment: start;
+            Rectangle {
+                width: 3px;
+                border-radius: 1.5px;
+                background: Theme.subtle.with-alpha(0.45);
+            }
+        }
+        if root.block.indent > 1: Rectangle {
+            width: (root.block.indent - 1) * 20px;
+        }
+        if root.block.marker != "" || root.block.indent > 0: Text {
+            width: 20px;
+            text: root.block.marker;
+            color: Theme.subtle;
+            font-size: root.font-size;
+            vertical-alignment: top;
+        }
+
+        if root.block.kind <= 2: StyledText {
+            horizontal-stretch: 1;
+            text: root.block.text;
+            default-color: root.block.kind == 2 ? Theme.subtle : Theme.text;
+            default-font-size: root.block.kind == 1 ? (root.block.level == 1 ? root.font-size * 1.6 : root.block.level == 2 ? root.font-size * 1.35 : root.font-size * 1.15) : root.block.kind == 2 ? root.font-size * 0.82 : root.font-size;
+            link-color: Theme.accent;
+            selectable: true;
+            link-clicked(url) => {
+                root.link-clicked(url);
+            }
+        }
+
+        if root.block.kind == 3: Rectangle {
+            horizontal-stretch: 1;
+            background: #282c34;
+            border-radius: 6px;
+            preferred-width: code.preferred-width;
+            preferred-height: code.preferred-height;
+            min-height: code.min-height;
+
+            code := VerticalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 4px;
+                if root.block.language != "": Text {
+                    text: root.block.language;
+                    color: #7f848e;
+                    font-size: 10.5px;
+                }
+                StyledText {
+                    text: root.block.text;
+                    default-color: #abb2bf;
+                    default-font-size: 12.5px;
+                    default-font-family: MarkdownStyle.mono;
+                    selectable: true;
+                }
+            }
+        }
+
+        if root.block.kind == 4: Rectangle {
+            horizontal-stretch: 1;
+            border-width: 1px;
+            border-color: Theme.subtle.with-alpha(0.35);
+            border-radius: 6px;
+            preferred-width: root.block.columns * 170px;
+            preferred-height: grid.preferred-height;
+            min-height: grid.min-height;
+
+            grid := VerticalLayout {
+                padding: 1px;
+                for line[i] in root.block.rows: VerticalLayout {
+                    if i > 0: Rectangle {
+                        height: 1px;
+                        background: Theme.subtle.with-alpha(0.25);
+                    }
+                    Rectangle {
+                        background: line.header ? Theme.text.with-alpha(0.06) : transparent;
+                        preferred-height: cells.preferred-height;
+                        min-height: cells.min-height;
+                        cells := HorizontalLayout {
+                            // Colonnes de même largeur sur toutes les lignes : chaque cellule a une
+                            // largeur « souhaitée » nulle et prend une part égale de la place.
+                            for cell in line.cells: Rectangle {
+                                horizontal-stretch: 1;
+                                preferred-width: 0px;
+                                min-width: 0px;
+                                preferred-height: padded.preferred-height;
+                                min-height: padded.min-height;
+                                padded := HorizontalLayout {
+                                    padding-left: 7px;
+                                    padding-right: 7px;
+                                    padding-top: 5px;
+                                    padding-bottom: 5px;
+                                    StyledText {
+                                        text: cell.text;
+                                        default-color: Theme.text;
+                                        default-font-size: root.font-size - 1px;
+                                        horizontal-alignment: cell.align == 1 ? TextHorizontalAlignment.center : cell.align == 2 ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+                                        selectable: true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.block.kind == 5: VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            padding-top: 4px;
+            padding-bottom: 4px;
+            Rectangle {
+                height: 1px;
+                background: Theme.card-border;
+            }
+        }
+    }
+}
+
+export component MarkdownView inherits VerticalLayout {
+    in property <[BlockItem]> blocks;
+    in property <length> font-size: 14px;
+    callback link-clicked(string);
+    spacing: 5px;
+
+    for block in root.blocks: BlockView {
+        block: block;
+        font-size: root.font-size;
+        link-clicked(url) => {
+            root.link-clicked(url);
+        }
+    }
+}

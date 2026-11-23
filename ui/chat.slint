@@ -6,6 +6,7 @@
 
 import { Button, LineEdit, CheckBox, ScrollView, TextEdit, ProgressIndicator } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { MarkdownView, BlockItem } from "markdown.slint";
 
 export struct ConversationItem {
     id: string,
@@ -50,8 +51,11 @@ export struct MessageItem {
     system: bool,
     header: bool,
     time: string,
-    text: styled-text,
+    blocks: [BlockItem],
+    // Texte brut (émojis seuls affichés en grand).
+    plain: string,
     has-text: bool,
+    has-code: bool,
     deleted: bool,
     edited: bool,
     jumbo: bool,
@@ -537,6 +541,12 @@ component MessageRow inherits Rectangle {
                         ChatData.message-action(root.index, "copy");
                     }
                 }
+                if root.message.has-code: MenuItem {
+                    title: "Copier le code";
+                    activated => {
+                        ChatData.message-action(root.index, "copy-code");
+                    }
+                }
                 if root.message.mine && root.can-act && root.message.has-text: MenuItem {
                     title: "Modifier";
                     activated => {
@@ -632,12 +642,12 @@ component MessageRow inherits Rectangle {
                                     font-size: 13px;
                                     font-italic: true;
                                 }
-                                if !root.message.deleted: StyledText {
-                                    text: root.message.text;
-                                    default-color: Theme.text;
-                                    default-font-size: root.message.jumbo ? 34px : 14px;
-                                    link-color: Theme.accent;
-                                    selectable: true;
+                                if !root.message.deleted && root.message.jumbo: Text {
+                                    text: root.message.plain;
+                                    font-size: 34px;
+                                }
+                                if !root.message.deleted && !root.message.jumbo: MarkdownView {
+                                    blocks: root.message.blocks;
                                     link-clicked(url) => {
                                         ChatData.open-link(url);
                                     }

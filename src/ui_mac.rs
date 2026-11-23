@@ -6,6 +6,8 @@
 
 #[path = "ui_mac_chat.rs"]
 mod chat_page;
+#[path = "ui_mac_markdown.rs"]
+mod markdown_view;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -433,6 +435,11 @@ define_class!(
         #[unsafe(method(chatCopyMessage:))]
         fn chat_copy_message_action(&self, sender: &AnyObject) {
             self.chat_copy_message(tag_of(sender));
+        }
+
+        #[unsafe(method(chatCopyCode:))]
+        fn chat_copy_code_action(&self, sender: &AnyObject) {
+            self.chat_copy_code(tag_of(sender));
         }
 
         #[unsafe(method(chatReact:))]

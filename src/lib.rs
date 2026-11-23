@@ -3,6 +3,7 @@
 pub mod chat;
 pub mod crypto;
 pub mod engine;
+pub mod highlight;
 pub mod markdown;
 mod net;
 pub mod protocol;

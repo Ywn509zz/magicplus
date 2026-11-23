@@ -4,16 +4,15 @@
 //! « en train d'écrire », autocollants et GIF. Rien ne dépend d'Internet.
 
 use super::*;
+use super::markdown_view::{code_of, markdown_view};
 use crate::shared::{avatar_hue, initials, jumbo, open_path, time_label};
 use magicplus_core::{markdown, AttachmentKind, ConversationKind, ConversationView, MessageStatus, MessageView};
 use objc2::{runtime::NSObjectProtocol as _, AnyThread};
 use objc2_app_kit::{
-    NSBackgroundColorAttributeName, NSClickGestureRecognizer, NSControlSize, NSEventModifierFlags,
-    NSFontAttributeName, NSFontManager, NSFontTraitMask, NSFontWeightRegular, NSForegroundColorAttributeName,
-    NSLayoutConstraintOrientation, NSLineBreakMode, NSLinkAttributeName, NSPasteboard,
-    NSStrikethroughStyleAttributeName,
+    NSClickGestureRecognizer, NSControlSize, NSEventModifierFlags, NSFontManager, NSFontTraitMask,
+    NSLayoutConstraintOrientation, NSLineBreakMode, NSPasteboard,
 };
-use objc2_foundation::{NSAttributedString, NSMutableAttributedString, NSNumber, NSRange, NSURL};
+use objc2_foundation::NSURL;
 use std::{
     cell::Cell,
     path::PathBuf,
@@ -105,48 +104,6 @@ fn avatar(name: &str, seed: &str, size: f64, mtm: MainThreadMarker) -> Retained<
     letters.centerXAnchor().constraintEqualToAnchor(&view.centerXAnchor()).setActive(true);
     letters.centerYAnchor().constraintEqualToAnchor(&view.centerYAnchor()).setActive(true);
     view
-}
-
-/// Markdown → texte mis en forme AppKit.
-fn attributed(text: &str, size: f64, mtm: MainThreadMarker) -> Retained<NSAttributedString> {
-    let result = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &ns(""));
-    let manager = NSFontManager::sharedFontManager(mtm);
-    let base = NSFont::systemFontOfSize(size);
-    let mut location = 0;
-    for span in markdown::parse(text) {
-        let piece = NSAttributedString::initWithString(NSAttributedString::alloc(), &ns(&span.text));
-        result.appendAttributedString(&piece);
-        let length = span.text.encode_utf16().count();
-        let range = NSRange::new(location, length);
-        location += length;
-
-        let mut font = if span.code {
-            NSFont::monospacedSystemFontOfSize_weight(size - 1.0, unsafe { NSFontWeightRegular })
-        } else {
-            base.clone()
-        };
-        if span.bold {
-            font = manager.convertFont_toHaveTrait(&font, NSFontTraitMask::BoldFontMask);
-        }
-        if span.italic {
-            font = manager.convertFont_toHaveTrait(&font, NSFontTraitMask::ItalicFontMask);
-        }
-        let color = if span.link.is_some() { NSColor::linkColor() } else { NSColor::labelColor() };
-        unsafe {
-            result.addAttribute_value_range(NSFontAttributeName, &font, range);
-            result.addAttribute_value_range(NSForegroundColorAttributeName, &color, range);
-            if span.strike {
-                result.addAttribute_value_range(NSStrikethroughStyleAttributeName, &NSNumber::numberWithInt(1), range);
-            }
-            if span.code {
-                result.addAttribute_value_range(NSBackgroundColorAttributeName, &NSColor::quaternaryLabelColor(), range);
-            }
-            if let Some(url) = span.link.as_deref().and_then(|url| NSURL::URLWithString(&ns(url))) {
-                result.addAttribute_value_range(NSLinkAttributeName, &url, range);
-            }
-        }
-    }
-    Retained::into_super(result)
 }
 
 // ------------------------------------------------------------------ état de la page
@@ -755,14 +712,14 @@ impl Controller {
             gone.setFont(Some(&NSFontManager::sharedFontManager(mtm).convertFont_toHaveTrait(&NSFont::systemFontOfSize(12.5), NSFontTraitMask::ItalicFontMask)));
             content.addArrangedSubview(&gone);
             has_content = true;
-        } else if !message.text.is_empty() {
-            let size = if jumbo(&message.text) { 34.0 } else { 13.5 };
-            let text = NSTextField::wrappingLabelWithString(&ns(""), mtm);
-            text.setAttributedStringValue(&attributed(&message.text, size, mtm));
-            text.setSelectable(true);
-            text.setAllowsEditingTextAttributes(true);
-            text.setPreferredMaxLayoutWidth(ui.bubble_width);
+        } else if jumbo(&message.text) {
+            // Seulement des émojis : en grand, comme sur Discord.
+            let text = label(message.text.trim(), mtm);
+            text.setFont(Some(&NSFont::systemFontOfSize(34.0)));
             content.addArrangedSubview(&text);
+            has_content = true;
+        } else if !message.text.is_empty() {
+            content.addArrangedSubview(&markdown_view(&message.text, 13.5, ui.bubble_width, mtm));
             has_content = true;
         }
         for attachment in &message.attachments {
@@ -880,6 +837,9 @@ impl Controller {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             if !message.text.is_empty() {
                 add("Copier le texte", sel!(chatCopyMessage:), index as isize);
+            }
+            if code_of(&message.text).is_some() {
+                add("Copier le code", sel!(chatCopyCode:), index as isize);
             }
             if message.mine {
                 add("Modifier", sel!(chatEdit:), index as isize);
@@ -1074,6 +1034,12 @@ impl Controller {
     pub(super) fn chat_copy_message(&self, index: isize) {
         if let Some(message) = self.message_at(index) {
             self.copy_text(&markdown::plain(&message.text));
+        }
+    }
+
+    pub(super) fn chat_copy_code(&self, index: isize) {
+        if let Some(code) = self.message_at(index).and_then(|message| code_of(&message.text)) {
+            self.copy_text(&code);
         }
     }
 

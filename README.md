@@ -288,10 +288,18 @@ membre, par le même canal Noise que le reste.
   message n'est accepté que si la clé prouvée pendant la poignée de main Noise est celle d'un membre.
   Seul le créateur ajoute des membres ou renomme le groupe ; chacun peut le quitter (`leave`, la
   conversation passe en lecture seule). Les nouveaux membres reçoivent l'historique.
-- **Markdown** (`src/markdown.rs`) : `**gras**`, `*italique*`, `~~barré~~`, `` `code` ``, blocs
-  ```` ``` ````, `[texte](https://…)` et liens nus. Seuls `http`, `https` et `mailto` deviennent
-  des liens. Le Mac rend les morceaux de `markdown::parse` ; Slint reçoit `markdown::to_commonmark`,
-  un Markdown où tout le texte est échappé (titres, listes, HTML tapés restent du texte).
+- **Markdown** (`src/markdown.rs`, analyse par `pulldown-cmark`) : CommonMark complet + extensions
+  GitHub (tableaux, cases à cocher, barré, encadrés `> [!NOTE]` / `[!TIP]` / `[!WARNING]`…) + habitudes
+  de Discord (`__souligné__`, `-# petit texte`, retours à la ligne gardés tels quels) + couleurs
+  `<font color="rouge">…</font>` ou `<span style="color:#e5484d">` (noms français ou anglais, `#rgb`,
+  `#rrggbb`). `markdown::parse` rend une liste **plate** de blocs (texte, titre 1-3, petit texte,
+  code, tableau, séparateur) avec leur puce, profondeur de liste et de citation ; chaque interface
+  les empile (`src/ui_mac_markdown.rs`, `ui/markdown.slint` + `src/ui_slint/markdown.rs`). Blocs de
+  code colorés par `src/highlight.rs` (Rust, JS/TS, C/C++/Java/Go/Swift…, Python, shell, SQL, Lua,
+  JSON, YAML/TOML, HTML/XML, CSS ; thème One Dark sur fond sombre). Le HTML n'est jamais
+  interprété (sauf couleur et `<u>`), seuls `http`, `https` et `mailto` deviennent des liens, et
+  aucune image n'est chargée depuis Internet. Slint reçoit chaque bloc réécrit en Markdown strict
+  (`spans_to_commonmark`, texte entièrement échappé) que son `StyledText` accepte toujours.
 - **Autocollants** : une image devient un PNG de 320 px au plus (`image`), un GIF est gardé tel quel
   (animé) ; bibliothèque locale `discussions/autocollants/`, envoyée comme pièce jointe `sticker`.
 - **Interfaces** : la liste des conversations à gauche, les messages groupés par auteur (avatar,

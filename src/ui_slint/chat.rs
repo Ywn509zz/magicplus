@@ -7,7 +7,7 @@ use magicplus_core::{
     markdown, protocol::MAX_ATTACHMENTS, util::format_size, AttachmentKind, AttachmentView, ConversationKind, ConversationView,
     Engine, MessageStatus, MessageView,
 };
-use slint::{Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, StyledText, VecModel};
+use slint::{Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -139,14 +139,6 @@ fn avatar_color(seed: &str) -> Color {
     Color::from_rgb_f32(r + m, g + m, b + m)
 }
 
-fn styled(markdown_text: &str) -> StyledText {
-    StyledText::from_markdown(&markdown::to_commonmark(markdown_text)).unwrap_or_else(|error| {
-        if std::env::var_os("MAGICPLUS_DEBUG").is_some() {
-            eprintln!("[discussions] Markdown refusé par Slint : {error}");
-        }
-        StyledText::from_plain_text(&markdown::plain(markdown_text))
-    })
-}
 
 fn status_label(message: &MessageView) -> String {
     match &message.status {
@@ -818,6 +810,14 @@ impl Chat {
                 Ok(()) => self.status("Texte du message copié"),
                 Err(error) => self.status(error.to_string()),
             },
+            "copy-code" => {
+                if let Some(code) = super::markdown::code_of(&message.text) {
+                    match self.engine.write_local_clipboard(&code) {
+                        Ok(()) => self.status("Code copié"),
+                        Err(error) => self.status(error.to_string()),
+                    }
+                }
+            }
             _ => {
                 if let Some(emoji) = action.strip_prefix("react:") {
                     if let Err(error) = self.engine.toggle_reaction(&conversation, &message.id, emoji) {
@@ -1050,7 +1050,9 @@ fn message_item(message: &MessageView, header: bool, last_mine: bool, attachment
         system: message.system,
         header,
         time: time_label(message.sent_ms).into(),
-        text: if message.deleted || message.system { StyledText::default() } else { styled(&message.text) },
+        blocks: if message.deleted || message.system { ModelRc::default() } else { super::markdown::blocks(&message.text) },
+        plain: message.text.trim().into(),
+        has_code: !message.deleted && super::markdown::code_of(&message.text).is_some(),
         has_text: !message.text.trim().is_empty() && !message.deleted,
         deleted: message.deleted,
         edited: message.edited,
@@ -1138,33 +1140,4 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
     on!(on_send_sticker, |chat, id| chat.send_sticker(&id));
     on!(on_add_sticker, |chat| chat.add_sticker());
     on!(on_remove_sticker, |chat, id| chat.remove_sticker(&id));
-}
-
-#[cfg(test)]
-mod tests {
-    use magicplus_core::markdown;
-    use slint::StyledText;
-
-    /// Aucun message, même piégé, ne doit faire échouer l'analyseur Markdown de Slint.
-    #[test]
-    fn slint_accepte_tous_les_messages() {
-        let messages = [
-            "Salut **B** 👋",
-            "# titre\n## sous-titre\n- liste\n1. numéro\n> citation\n---\n===",
-            "<b>html</b> <u>souligné</u> <font color=red>x</font> &amp; &#169;",
-            "**gras _italique ~~barré~~_** `code` [lien](https://exemple.fr/a_(b)) https://nu.fr/x?y=1&z=2.",
-            "    bloc indenté\n\tavec tabulation",
-            "```\nlet x = `a` + \"**\";\n```\naprès",
-            "{} {0} \u{E541} \\ \\\\ * _ ~ ` [ ] ( ) < > | !",
-            "**(parenthèses)**a*b*c **  espaces  ** ~~~triple~~~",
-            "a\n\n\nb\r\nc",
-            "[](https://vide.fr) [texte]( https://espace.fr ) [x](javascript:alert(1))",
-            "",
-            "🎉🎉",
-        ];
-        for message in messages {
-            let commonmark = markdown::to_commonmark(message);
-            assert!(StyledText::from_markdown(&commonmark).is_ok(), "refusé : {message:?} → {commonmark:?}");
-        }
-    }
 }

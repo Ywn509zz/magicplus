@@ -2,6 +2,7 @@
 //! La page « Discussions » est dans `ui_slint/chat.rs`.
 
 mod chat;
+mod markdown;
 
 use crate::shared::{hotkey_labels, open_path, platform_label, reveal, setup_hotkeys, update_action, update_pending, update_texts};
 use magicplus_core::{util::format_size, Engine, Snapshot, TransferState};
@@ -149,6 +150,7 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         ui.invoke_apply_theme(dark);
     }
     refresh(&ui, &initial, true);
+    ui.global::<MarkdownStyle>().set_mono(markdown::monospace_family().into());
     let chat: Rc<chat::Chat> = chat::Chat::new(engine.clone(), &ui);
 
     // ---- actions de l'interface

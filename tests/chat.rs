@@ -300,6 +300,28 @@ fn attachments_and_stickers_are_delivered() {
 }
 
 /// Données de démonstration pour regarder l'interface (pas un vrai test) :
+/// Message de démonstration qui utilise tout le Markdown pris en charge.
+const DEMO_MARKDOWN: &str = "## Programme du voyage
+-# mis à jour ce matin
+1. **Samedi** : départ à 8 h
+2. *Dimanche* : plage et __pique-nique__
+   - [x] glacière
+   - [ ] parasol
+
+> [!TIP]
+> Pensez à la crème solaire, <font color=\"orange\">indice 50</font> !
+
+| Qui | Apporte | Budget |
+|:--|:--|--:|
+| Léa | Tente | 120 € |
+| Max | ~~Barbecue~~ Réchaud | 45 € |
+
+```python
+def partage(total, personnes=3):
+    # chacun paie la même chose
+    return round(total / personnes, 2)
+```";
+
 /// `MAGICPLUS_DEMO_DIR=/dossier cargo test --test chat donnees_de_demo -- --ignored`
 /// puis `MAGICPLUS_DATA_DIR=/dossier/data MAGICPLUS_START_PAGE=1 ./target/debug/magicplus`.
 #[test]
@@ -340,8 +362,10 @@ fn donnees_de_demo() {
     b.send_chat(&group, "Top ! Combien de chambres ?", None, &[]).unwrap();
     thread::sleep(Duration::from_millis(400));
     c.send_chat(&group, "**Trois**, et une terrasse.", None, &[]).unwrap();
+    thread::sleep(Duration::from_millis(400));
+    b.send_chat(&group, DEMO_MARKDOWN, None, &[]).unwrap();
     wait_for("tout reçu", Duration::from_secs(20), || {
-        texts(&a.messages(&group, 50)).len() == 3
+        texts(&a.messages(&group, 50)).len() == 4
             && a.messages(&direct, 50).iter().any(|m| m.attachments.iter().any(|x| x.path.is_some()))
     });
     a.mark_read(&group);
