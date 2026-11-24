@@ -215,7 +215,13 @@ impl Inner {
         });
         self.save_friends(&friends);
         drop(friends);
-        self.set_status(format!("{} vous demande en ami (groupe « {group} ») : répondez dans la page Appareils", self.name_or(&member.id, &member.name)));
+        let name = self.name_or(&member.id, &member.name);
+        self.set_status(format!("{name} vous demande en ami (groupe « {group} ») : répondez dans la page Appareils"));
+        self.notify(crate::engine::Notice {
+            conversation: None,
+            title: "Demande d'ami".to_string(),
+            body: format!("{name} (groupe « {group} ») veut devenir votre ami"),
+        });
         self.touch();
         Ok("pending".to_string())
     }

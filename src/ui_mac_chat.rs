@@ -464,6 +464,7 @@ impl Controller {
 
         // Pastille des non-lus dans la barre latérale.
         let unread: usize = conversations.iter().map(|c| c.unread).sum();
+        self.set_unread_badge(unread);
         if let Some(nav) = self.widgets().nav.get(CHAT_PAGE) {
             let title = if unread > 0 { format!("  Discussions  ({unread})") } else { "  Discussions".to_string() };
             nav.setTitle(&ns(&title));

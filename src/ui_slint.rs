@@ -6,6 +6,7 @@ mod chat;
 mod images;
 mod markdown;
 mod profile;
+mod tray;
 
 use crate::shared::{hotkey_labels, open_path, platform_label, reveal, setup_hotkeys, update_action, update_pending, update_texts};
 use magicplus_core::{util::format_size, Engine, Snapshot, TransferState};
@@ -178,6 +179,7 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
         ui.set_resume_index(index as i32);
         ui.set_auto_copy(snapshot.settings.auto_copy_received);
         ui.set_update_auto(snapshot.settings.auto_update);
+        ui.set_notifications_on(snapshot.settings.notifications);
     }
 }
 
@@ -443,6 +445,27 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         let engine = engine.clone();
         ui.on_allow_firewall(move || engine.allow_firewall());
     }
+    ui.set_launch_at_login(engine.launch_at_login());
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        ui.on_launch_at_login_changed(move |enabled| {
+            if let Err(error) = engine.set_launch_at_login(enabled) {
+                engine.set_status(error.to_string());
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_launch_at_login(engine.launch_at_login());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_notifications_changed(move |enabled| {
+            if let Err(error) = engine.update_settings(|settings| settings.notifications = enabled) {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
     {
         let engine = engine.clone();
         ui.on_update_act(move || {
@@ -469,6 +492,69 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- raccourcis globaux (doivent être enregistrés depuis le fil principal)
     let hotkeys = setup_hotkeys(&engine);
+
+    // ---- arrière-plan (Windows) : icône de la zone de notification, notifications du système.
+    // Fenêtre fermée : MagicPlus reste actif et joignable ; « Quitter » est dans le menu de l'icône.
+    let tray = tray::Tray::new().map(Rc::new);
+    let last_notice: Rc<std::cell::RefCell<Option<String>>> = Rc::default();
+    let tray_timer = slint::Timer::default();
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        let chat = chat.clone();
+        let tray = tray.clone();
+        tray_timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let notices = engine.take_notices();
+            let Some(tray) = &tray else { return };
+            for notice in notices {
+                let watching = ui.get_page() == chat::CHAT_PAGE
+                    && notice.conversation.is_some()
+                    && notice.conversation == chat.current_conversation()
+                    && tray::is_foreground("MagicPlus");
+                if !watching {
+                    tray.notify(&notice.title, &notice.body);
+                    *last_notice.borrow_mut() = Some(notice.conversation.clone().unwrap_or_default());
+                }
+            }
+            for event in tray.take_events() {
+                match event {
+                    tray::TrayEvent::Quit => {
+                        let _ = slint::quit_event_loop();
+                    }
+                    tray::TrayEvent::Open | tray::TrayEvent::NoticeClicked => {
+                        let _ = ui.show();
+                        tray::bring_to_front("MagicPlus");
+                        if event == tray::TrayEvent::NoticeClicked {
+                            match last_notice.borrow().clone() {
+                                Some(conversation) if !conversation.is_empty() => {
+                                    ui.set_page(chat::CHAT_PAGE);
+                                    chat.open_conversation(&conversation);
+                                }
+                                Some(_) => ui.set_page(0),
+                                None => {}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Première fermeture de la fenêtre : on explique que MagicPlus continue de tourner.
+    if let Some(tray) = &tray {
+        let tray = tray.clone();
+        let explained = std::cell::Cell::new(false);
+        ui.window().on_close_requested(move || {
+            if !explained.replace(true) {
+                tray.notify(
+                    "MagicPlus reste actif",
+                    "Il reste joignable par vos appareils et vous prévient des messages. Clic droit sur son icône pour le quitter.",
+                );
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
 
     // ---- rafraîchissement : l'interface ne se redessine que si le moteur a changé
     let timer = slint::Timer::default();
@@ -633,7 +719,17 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    ui.run()?;
+    if tray.is_some() {
+        // Lancé à l'ouverture de la session : seulement l'icône, fenêtre cachée.
+        if !magicplus_core::autostart::launched_at_login() {
+            ui.show()?;
+        }
+        slint::run_event_loop_until_quit()?;
+        let _ = ui.hide();
+    } else {
+        ui.run()?;
+    }
+    drop(tray);
     engine.shutdown();
     drop(hotkeys);
     Ok(())

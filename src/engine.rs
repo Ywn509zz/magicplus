@@ -208,6 +208,15 @@ pub struct Snapshot {
     pub friend_requests: Vec<crate::friends::FriendRequestView>,
 }
 
+/// Notification du système à afficher (message reçu, demande d'ami…).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Notice {
+    /// Conversation à ouvrir au clic (aucune : page Appareils).
+    pub conversation: Option<String>,
+    pub title: String,
+    pub body: String,
+}
+
 /// Appareil MagicPlus d'une autre version : il s'annonce, mais les deux appareils s'ignorent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtherVersionView {
@@ -309,6 +318,8 @@ pub(crate) struct Inner {
     pub firewall: Mutex<crate::firewall::FirewallState>,
     /// Demandes d'ami entre membres d'un même groupe.
     pub friends: Mutex<crate::friends::FriendStore>,
+    /// Notifications pas encore affichées par l'interface.
+    pub notices: Mutex<Vec<Notice>>,
     /// Tests : la coupure simulée n'a lieu qu'une fois.
     pub test_cut_done: AtomicBool,
     /// Discussions (conversations, journal d'événements, synchronisation).
@@ -398,6 +409,7 @@ impl Engine {
                     crate::firewall::FirewallState::Ok
                 }),
                 friends: Mutex::new(friends),
+                notices: Mutex::default(),
                 test_cut_done: AtomicBool::new(false),
                 chat: Mutex::new(chat),
                 dirty: AtomicBool::new(true),
@@ -414,6 +426,18 @@ impl Engine {
         crate::canvas::spawn_canvas_scheduler(engine.inner.clone());
         engine.spawn_update_checker();
         engine.spawn_firewall_checker();
+        // Développement : une notification d'essai 3 s après le démarrage.
+        if std::env::var_os("MAGICPLUS_TEST_NOTICE").is_some() {
+            let inner = engine.inner.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(3));
+                inner.notify(Notice {
+                    conversation: None,
+                    title: "MagicPlus".to_string(),
+                    body: "Notification d'essai : les messages reçus s'afficheront ainsi.".to_string(),
+                });
+            });
+        }
         crate::friends::spawn_friend_scheduler(engine.inner.clone());
         Ok(engine)
     }
@@ -429,6 +453,26 @@ impl Engine {
 
     pub fn status(&self) -> String {
         lock(&self.inner.status).clone()
+    }
+
+    /// Notifications à afficher depuis le dernier appel (messages, demandes d'ami).
+    pub fn take_notices(&self) -> Vec<Notice> {
+        std::mem::take(&mut *lock(&self.inner.notices))
+    }
+
+    /// Lancement automatique à l'ouverture de la session (lu dans le système).
+    pub fn launch_at_login(&self) -> bool {
+        crate::autostart::is_enabled()
+    }
+
+    pub fn set_launch_at_login(&self, enabled: bool) -> Result<()> {
+        crate::autostart::set_enabled(enabled)?;
+        self.inner.set_status(if enabled {
+            "MagicPlus se lancera à l'ouverture de la session, en arrière-plan"
+        } else {
+            "MagicPlus ne se lancera plus au démarrage"
+        });
+        Ok(())
     }
 
     pub fn set_status(&self, text: impl Into<String>) {
@@ -910,6 +954,19 @@ impl Inner {
         let text = text.into();
         eprintln!("[magicplus] {text}");
         *lock(&self.status) = text;
+        self.touch();
+    }
+
+    /// Notification pour l'interface (si l'utilisateur les veut).
+    pub(crate) fn notify(&self, notice: Notice) {
+        if !lock(&self.settings).notifications {
+            return;
+        }
+        let mut notices = lock(&self.notices);
+        if notices.len() < 20 {
+            notices.push(notice);
+        }
+        drop(notices);
         self.touch();
     }
 

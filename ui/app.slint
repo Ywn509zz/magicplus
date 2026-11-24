@@ -377,6 +377,9 @@ export component AppWindow inherits Window {
     in property <bool> update-has-page;
     in property <bool> update-pending;
     in-out property <bool> update-auto: true;
+    // Démarrage avec la session, notifications du système.
+    in-out property <bool> launch-at-login;
+    in-out property <bool> notifications-on: true;
     // Mon profil (Paramètres).
     in property <ProfileItem> my-profile;
     in-out property <string> profile-bio;
@@ -429,6 +432,8 @@ export component AppWindow inherits Window {
     callback save-pseudo(string);
     callback set-alias(string, string);
     callback update-auto-changed(bool);
+    callback launch-at-login-changed(bool);
+    callback notifications-changed(bool);
     // Demande d'ami : 1 accepter, 0 refuser, -1 retirer la nôtre.
     callback friend-answer(string, int);
     callback allow-firewall();
@@ -1326,6 +1331,29 @@ export component AppWindow inherits Window {
                                 }
                                 Subtle {
                                     text: "Activé : copiez sur l'autre appareil (ou Ctrl + Shift + Alt + C), puis collez directement ici.";
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Démarrage et notifications";
+                                }
+                                CheckBox {
+                                    text: "Lancer MagicPlus à l'ouverture de la session (en arrière-plan, dans la zone de notification)";
+                                    checked <=> root.launch-at-login;
+                                    toggled => {
+                                        root.launch-at-login-changed(self.checked);
+                                    }
+                                }
+                                CheckBox {
+                                    text: "Afficher une notification à chaque message ou demande d'ami reçus";
+                                    checked <=> root.notifications-on;
+                                    toggled => {
+                                        root.notifications-changed(self.checked);
+                                    }
+                                }
+                                Subtle {
+                                    text: "Fermer la fenêtre ne quitte pas MagicPlus : il reste joignable par vos autres appareils et vous prévient des messages. Pour le quitter : clic droit sur son icône près de l'horloge → Quitter MagicPlus.";
                                 }
                             }
 

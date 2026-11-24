@@ -146,7 +146,16 @@ cargo test
    **Groupes** : bouton « … » en haut de la conversation : « Ajouter des membres… » (pour **tout**
    membre, parmi ses appareils associés), liste des membres avec « Ajouter en ami » pour ceux que l'on
    n'a pas associés ; la demande arrive dans la page Appareils de l'autre (Accepter / Refuser).
-6. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
+6. **Arrière-plan et notifications** : fermer la fenêtre ne quitte pas MagicPlus. Il reste actif
+   (icône dans la barre des menus sur Mac, près de l'horloge sous Windows), donc **joignable par les
+   autres appareils**, et affiche une **notification du système** à chaque message ou demande d'ami
+   reçus (sauf si la conversation est déjà sous vos yeux) ; un clic ouvre la conversation. Le nombre
+   de messages non lus s'affiche sur l'icône (et sur celle du Dock). Pour le quitter : menu de
+   l'icône → Quitter MagicPlus (ou Cmd+Q sur Mac). **Paramètres → Démarrage et notifications** :
+   « Lancer MagicPlus à l'ouverture de la session » (il démarre alors en arrière-plan, sans fenêtre)
+   et notifications activées ou non. Sur Mac, la première fois, macOS demande d'autoriser les
+   notifications (l'app doit être dans le dossier Applications).
+7. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
    « Paramètres » porte une pastille. **Paramètres → Mises à jour → Télécharger et installer**, puis
    **Redémarrer et installer** : MagicPlus se remplace et redémarre.
 
@@ -448,6 +457,27 @@ Comme sur Discord : photo de profil (fixe ou GIF animé), bannière (image ou co
 - « Copier et envoyer » simule Cmd/Ctrl+C dans l'application au premier plan (`osascript` sous macOS,
   PowerShell `SendKeys` sous Windows, `xdotool` sous Linux), après 350 ms pour laisser relâcher les touches.
 
+### Arrière-plan, notifications, démarrage
+
+- Le moteur tourne tant que le processus vit : la fenêtre se cache au lieu de se fermer.
+  - **Mac** (`src/ui_mac_system.rs`) : `applicationShouldTerminateAfterLastWindowClosed` = non,
+    clic sur le Dock = fenêtre, icône `NSStatusItem` (Ouvrir, Discussions, Quitter) avec le nombre de
+    non-lus, pastille du Dock, et `NSProcessInfo.beginActivity` pour que « App Nap » ne ralentisse
+    pas les annonces (sinon les autres appareils verraient celui-ci « hors ligne »).
+  - **Windows** (`src/ui_slint/tray.rs`, API Win32) : icône de la zone de notification
+    (`Shell_NotifyIcon`, menu Ouvrir / Quitter), boucle Slint `run_event_loop_until_quit`, première
+    fermeture expliquée par une notification.
+- **Notifications** : le moteur range un `Notice` (titre, texte en clair sans Markdown, conversation)
+  pour chaque message reçu (trois au plus par lot, puis « N nouveaux messages ») et chaque demande
+  d'ami ; l'interface les lit (`Engine::take_notices`) et ne montre que ce qui n'est pas déjà à
+  l'écran. Mac : `UNUserNotificationCenter` (autorisation demandée au premier lancement ; hors d'un
+  `.app`, en développement, `osascript`). Windows : bulles de l'icône, affichées comme des
+  notifications Windows 10/11. Réglage `Settings::notifications`.
+- **Démarrage** (`src/autostart.rs`, argument `--demarrage` = fenêtre cachée) : Mac
+  `~/Library/LaunchAgents/com.magicplus.app.plist` (`open -g -a MagicPlus.app`), Windows
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\MagicPlus`, Linux
+  `~/.config/autostart/magicplus.desktop`. L'état est lu dans le système, pas dans les réglages.
+
 ### Stockage local
 
 Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlus` (Windows),
@@ -481,6 +511,8 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/chat.rs` | Discussions et groupes : événements numérotés, synchronisation, lectures, autocollants. |
 | `src/friends.rs` | Demandes d'ami entre membres d'un groupe : envoi, réponse, association. |
 | `src/firewall.rs` | Pare-feu Windows (vérification, autorisation en un clic) et cartes réseau virtuelles. |
+| `src/autostart.rs` | Lancement à l'ouverture de la session (agent macOS, clé `Run` Windows, `.desktop` Linux). |
+| `src/ui_mac_system.rs`, `src/ui_slint/tray.rs` | Arrière-plan : icône (barre des menus, zone de notification), notifications du système. |
 | `src/markdown.rs` | Markdown des messages (analyse, texte brut, réécriture pour Slint). |
 | `src/update.rs` | Mises à jour : recherche sur GitHub, téléchargement vérifié, remplacement de l'app. |
 | `src/profile.rs` | Profils : images, diffusion aux contacts, réception. |
@@ -512,6 +544,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `MAGICPLUS_DATA_DIR=/chemin` | Autre dossier de données (seconde instance de test, captures). |
 | `MAGICPLUS_PORTS=46454,46455` | Autres ports d'annonce et de connexion : une copie lancée à côté de la vraie, invisible des appareils du réseau. |
 | `MAGICPLUS_FAKE_FIREWALL=1` | Affiche l'avertissement du pare-feu Windows (captures). |
+| `MAGICPLUS_TEST_NOTICE=1` | Une notification d'essai 3 s après le démarrage. |
 | `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation, `MAGICPLUS_START_CANVAS=1` (ou `historique`) ses canevas. |
 | `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série. |
 | `MAGICPLUS_DEMO_DIR=/dossier` | Avec `cargo test --test chat donnees_de_demo -- --ignored` : fabrique des discussions de démonstration. |

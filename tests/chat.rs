@@ -102,12 +102,22 @@ fn direct_chat_reply_edit_reaction_read_typing_delete() {
     let b_list = b.conversations();
     let b_conversation = b_list.iter().find(|c| c.id == conversation).unwrap();
     assert_eq!(b_conversation.title, "Machine A");
+    // Notification du système : titre = l'auteur, texte sans Markdown ; rien chez l'auteur.
+    let notices = b.take_notices();
+    assert!(
+        notices.iter().any(|n| n.title == "Machine A" && n.body == "Salut B 👋" && n.conversation.as_deref() == Some(conversation.as_str())),
+        "{notices:?}"
+    );
+    assert!(a.take_notices().is_empty());
+    // Désactivées dans les réglages : plus rien.
+    b.update_settings(|s| s.notifications = false).unwrap();
     assert_eq!(b_conversation.unread, 1);
 
     // Réponse.
     let original = find(&b.messages(&conversation, 50), "Salut **B** 👋").id.clone();
     b.send_chat(&conversation, "Coucou !", Some(&original), &[]).unwrap();
     wait_for("A reçoit la réponse", Duration::from_secs(10), || texts(&a.messages(&conversation, 50)).len() == 2);
+    assert_eq!(a.take_notices().len(), 1, "A est notifié de la réponse");
     let reply = find(&a.messages(&conversation, 50), "Coucou !").reply.clone().unwrap();
     assert_eq!(reply.id, original);
     // Les extraits sont en texte brut (sans les marques Markdown).
@@ -146,6 +156,13 @@ fn direct_chat_reply_edit_reaction_read_typing_delete() {
     });
     // On ne modifie pas le message d'un autre.
     assert!(a.edit_chat(&conversation, &reply_id, "piraté").is_err());
+
+    // Notifications coupées chez B : un nouveau message n'en produit pas.
+    a.send_chat(&conversation, "Encore là ?", None, &[]).unwrap();
+    wait_for("B reçoit le dernier message", Duration::from_secs(10), || {
+        texts(&b.messages(&conversation, 50)).contains(&"Encore là ?".to_string())
+    });
+    assert!(b.take_notices().is_empty());
 
     for node in &nodes {
         node.engine.shutdown();
@@ -451,7 +468,7 @@ fn pseudo_alias_pins_forward_and_any_reaction() {
 
     // Transfert vers un groupe : C voit le message et le nom public de son auteur (pas le surnom de B).
     let group = a.create_group("Famille", &[id_of(b), id_of(c)]).unwrap();
-    wait_for("groupe", Duration::from_secs(10), || has_conversation(c, &group));
+    wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
     b.forward_chat(&direct, &message, &group).unwrap();
     wait_for("C reçoit le message transféré", Duration::from_secs(10), || {
         c.messages(&group, 20).iter().any(|m| m.text.contains("samedi") && m.forwarded.as_deref() == Some("Léa"))
@@ -540,6 +557,7 @@ fn any_member_adds_people_and_friend_requests() {
         a.snapshot().friend_requests.iter().any(|r| r.id == id_c && !r.incoming && r.delivered)
     });
     assert_eq!(state_of(c, &id_a), FriendState::Received);
+    assert!(c.take_notices().iter().any(|n| n.title == "Demande d'ami" && n.conversation.is_none()));
     c.answer_friend_request(&id_a, true).unwrap();
     assert!(c.snapshot().peers.iter().any(|p| p.id == id_a && p.trusted));
     wait_for("A associé à C", Duration::from_secs(15), || a.snapshot().peers.iter().any(|p| p.id == id_c && p.trusted));

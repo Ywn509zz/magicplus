@@ -14,6 +14,8 @@ mod profile_page;
 mod canvas_page;
 #[path = "ui_mac_menus.rs"]
 mod menus;
+#[path = "ui_mac_system.rs"]
+mod system;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -283,6 +285,8 @@ struct Widgets {
     profile_remove_banner: Retained<NSButton>,
     update_text: Retained<NSTextField>,
     update_auto: Retained<NSButton>,
+    launch_at_login: Retained<NSButton>,
+    notifications: Retained<NSButton>,
     update_check: Retained<NSButton>,
     update_action: Retained<NSButton>,
     update_page: Retained<NSButton>,
@@ -327,6 +331,10 @@ struct Ivars {
     /// Menu stylisé ouvert et les actions de ses boutons.
     popover: RefCell<Option<Retained<objc2_app_kit::NSPopover>>>,
     popover_actions: RefCell<Vec<menus::Action>>,
+    /// Fenêtre principale (cachée au lieu d'être fermée : MagicPlus reste joignable).
+    main_window: OnceCell<Retained<NSWindow>>,
+    /// Barre des menus, notifications, anti-« App Nap ».
+    system: OnceCell<system::SystemState>,
 }
 
 define_class!(
@@ -341,6 +349,38 @@ define_class!(
         fn tick(&self, _timer: &NSTimer) {
             self.refresh_if_needed();
             self.chat_tick();
+            self.system_tick();
+        }
+
+        #[unsafe(method(showMainWindow:))]
+        fn show_main_window_action(&self, _sender: &AnyObject) {
+            self.show_main_window();
+        }
+
+        #[unsafe(method(showDiscussions:))]
+        fn show_discussions_action(&self, _sender: &AnyObject) {
+            self.show_main_window();
+            self.show_page(CHAT_PAGE);
+        }
+
+        #[unsafe(method(launchAtLoginChanged:))]
+        fn launch_at_login_changed(&self, sender: &NSButton) {
+            let enabled = sender.state() == NSControlStateValueOn;
+            let engine = self.engine();
+            if let Err(error) = engine.set_launch_at_login(enabled) {
+                engine.set_status(error.to_string());
+            }
+            sender.setState(if engine.launch_at_login() { NSControlStateValueOn } else { 0 });
+        }
+
+        #[unsafe(method(notificationsChanged:))]
+        fn notifications_changed(&self, sender: &NSButton) {
+            let enabled = sender.state() == NSControlStateValueOn;
+            let engine = self.engine();
+            if let Err(error) = engine.update_settings(|settings| settings.notifications = enabled) {
+                engine.set_status(error.to_string());
+            }
+            self.refresh_if_needed();
         }
 
         // ---- discussions (logique dans ui_mac_chat.rs)
@@ -895,8 +935,18 @@ define_class!(
     }
 
     unsafe impl NSApplicationDelegate for Controller {
+        /// Fenêtre fermée : MagicPlus reste actif (barre des menus) et joignable par les autres.
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
+            false
+        }
+
+        /// Clic sur l'icône du Dock alors que la fenêtre est cachée.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _sender: &NSApplication, has_visible_windows: bool) -> bool {
+            if !has_visible_windows {
+                self.show_main_window();
+            }
             true
         }
 
@@ -1081,6 +1131,8 @@ impl Controller {
             widgets.resume_popup.selectItemAtIndex(index as isize);
             widgets.auto_copy.setState(if snapshot.settings.auto_copy_received { NSControlStateValueOn } else { 0 });
             widgets.update_auto.setState(if snapshot.settings.auto_update { NSControlStateValueOn } else { 0 });
+            widgets.notifications.setState(if snapshot.settings.notifications { NSControlStateValueOn } else { 0 });
+            widgets.launch_at_login.setState(if self.engine().launch_at_login() { NSControlStateValueOn } else { 0 });
         }
 
         self.refresh_profile_settings(first);
@@ -1858,6 +1910,34 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         ),
     );
 
+    let background_card = card_in(&content, Some("Démarrage et notifications"), mtm);
+    let launch_at_login = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &ns("Lancer MagicPlus à l'ouverture de la session (en arrière-plan, dans la barre des menus)"),
+            Some(as_target(controller)),
+            Some(sel!(launchAtLoginChanged:)),
+            mtm,
+        )
+    };
+    background_card.addArrangedSubview(&launch_at_login);
+    let notifications = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &ns("Afficher une notification à chaque message ou demande d'ami reçus"),
+            Some(as_target(controller)),
+            Some(sel!(notificationsChanged:)),
+            mtm,
+        )
+    };
+    background_card.addArrangedSubview(&notifications);
+    full_width(
+        &background_card,
+        &paragraph(
+            "Fermer la fenêtre ne quitte pas MagicPlus : il reste joignable par vos autres appareils et vous \
+             prévient des messages. Pour le quitter : menu MagicPlus ou icône de la barre des menus → Quitter.",
+            mtm,
+        ),
+    );
+
     let update_card = card_in(&content, Some("Mises à jour"), mtm);
     let update_text = paragraph("", mtm);
     update_text.setSelectable(true);
@@ -1951,6 +2031,8 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         profile_remove_banner,
         update_text,
         update_auto,
+        launch_at_login,
+        notifications,
         update_check,
         update_action,
         update_page,
@@ -2005,6 +2087,8 @@ pub fn run(engine: Engine) {
     app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
     build_menu(&app, mtm);
     let window = build_window(&controller, mtm);
+    let _ = controller.ivars().main_window.set(window.clone());
+    controller.setup_system(mtm);
 
     let start_page = std::env::var("MAGICPLUS_START_PAGE")
         .ok()
@@ -2040,8 +2124,11 @@ pub fn run(engine: Engine) {
     };
 
     window.center();
-    window.makeKeyAndOrderFront(None);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
+    // Lancé à l'ouverture de la session : en arrière-plan, fenêtre cachée.
+    if !magicplus_core::autostart::launched_at_login() {
+        window.makeKeyAndOrderFront(None);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
     app.run();
 }

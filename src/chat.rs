@@ -812,6 +812,8 @@ impl Inner {
         }
 
         let mut last = chat.conversations[conversation_id].meta.applied.get(&sender.id).copied().unwrap_or(0);
+        // Messages nouveaux (pour les notifications) : texte et types de pièces jointes.
+        let mut posts: Vec<(String, Vec<AttachmentKind>)> = Vec::new();
         let mut events = events;
         events.sort_by_key(|event| event.seq);
         for event in events {
@@ -827,6 +829,9 @@ impl Inner {
                 conversation.meta.applied.insert(sender.id.clone(), event.seq);
                 last = event.seq;
                 continue;
+            }
+            if let ChatKind::Post { text, attachments, .. } = &event.kind {
+                posts.push((text.clone(), attachments.iter().map(|a| a.kind).collect()));
             }
             chat.record(conversation_id, &sender.id, event.clone());
             last = event.seq;
@@ -847,7 +852,55 @@ impl Inner {
                 }
             }
         }
+        let group = chat.conversations.get(conversation_id).and_then(|c| {
+            (c.meta.kind == ConversationKind::Group).then(|| c.meta.name.clone())
+        });
+        let closed = chat.conversations.get(conversation_id).is_some_and(|c| c.meta.closed);
+        drop(chat);
+        if !posts.is_empty() && !closed {
+            self.notify_posts(conversation_id, group, sender, &posts);
+        }
         Ok(last)
+    }
+
+    /// Notifications des messages reçus (trois au plus, puis un résumé).
+    fn notify_posts(&self, conversation: &str, group: Option<String>, sender: &SenderInfo, posts: &[(String, Vec<AttachmentKind>)]) {
+        let author = self.display_name(&sender.id).unwrap_or_else(|| sender.name.clone());
+        let describe = |text: &str, kinds: &[AttachmentKind]| -> String {
+            let plain = crate::markdown::plain(text);
+            let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !plain.is_empty() {
+                return if plain.chars().count() > 180 { format!("{}…", plain.chars().take(180).collect::<String>()) } else { plain };
+            }
+            match kinds.first() {
+                Some(AttachmentKind::Image) => "🖼️ Photo".to_string(),
+                Some(AttachmentKind::Gif) => "GIF".to_string(),
+                Some(AttachmentKind::Video) => "🎬 Vidéo".to_string(),
+                Some(AttachmentKind::Sticker) => "Autocollant".to_string(),
+                Some(AttachmentKind::File) => "📎 Fichier".to_string(),
+                None => "Nouveau message".to_string(),
+            }
+        };
+        let (title, prefix) = match &group {
+            Some(name) if !name.is_empty() => (name.clone(), format!("{author} : ")),
+            Some(_) => ("Groupe".to_string(), format!("{author} : ")),
+            None => (author.clone(), String::new()),
+        };
+        let shown = if posts.len() > 3 { 2 } else { posts.len() };
+        for (text, kinds) in &posts[..shown] {
+            self.notify(crate::engine::Notice {
+                conversation: Some(conversation.to_string()),
+                title: title.clone(),
+                body: format!("{prefix}{}", describe(text, kinds)),
+            });
+        }
+        if posts.len() > shown {
+            self.notify(crate::engine::Notice {
+                conversation: Some(conversation.to_string()),
+                title,
+                body: format!("{prefix}{} nouveaux messages", posts.len() - shown),
+            });
+        }
     }
 
     pub(crate) fn receive_chat_typing(&self, sender: &SenderInfo, conversation_id: &str) -> Result<()> {

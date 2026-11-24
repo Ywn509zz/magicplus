@@ -1,5 +1,6 @@
 //! Cœur de MagicPlus : réseau local, chiffrement, presse-papiers et transferts de fichiers.
 
+pub mod autostart;
 pub mod canvas;
 pub mod chat;
 pub mod crypto;
@@ -28,6 +29,6 @@ pub use update::{UpdateState, UpdateView};
 pub use firewall::FirewallState;
 pub use friends::{FriendRequestView, FriendState};
 pub use engine::{
-    ClipboardView, Config, Engine, IdentityView, ManualView, OtherVersionView, PeerView, ReceivedView, Snapshot,
+    ClipboardView, Config, Engine, IdentityView, ManualView, Notice, OtherVersionView, PeerView, ReceivedView, Snapshot,
     TransferState, TransferView,
 };

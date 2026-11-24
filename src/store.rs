@@ -47,6 +47,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Surnoms donnés aux autres appareils, visibles seulement ici (id → surnom).
     pub aliases: std::collections::BTreeMap<String, String>,
+    /// Notifications du système pour les messages et demandes reçus.
+    pub notifications: bool,
 }
 
 impl Default for Settings {
@@ -59,6 +61,7 @@ impl Default for Settings {
             manual_addresses: Vec::new(),
             auto_update: true,
             aliases: std::collections::BTreeMap::new(),
+            notifications: true,
         }
     }
 }

@@ -378,8 +378,11 @@ fn other_version_is_explained() {
     };
 
     // Version 0.3 (pas de version dans l'annonce) : plus ancienne.
-    send("magicplus/3", "");
-    wait_for("avertissement 0.3", Duration::from_secs(5), || !engine.snapshot().other_versions.is_empty());
+    // Renvoyée tant qu'elle n'est pas lue : l'écoute UDP peut démarrer un peu après le moteur.
+    wait_for("avertissement 0.3", Duration::from_secs(10), || {
+        send("magicplus/3", "");
+        !engine.snapshot().other_versions.is_empty()
+    });
     let other = engine.snapshot().other_versions[0].clone();
     assert_eq!(other.name, "PC du salon");
     assert_eq!(other.version, "0.3");
@@ -388,8 +391,8 @@ fn other_version_is_explained() {
     assert!(engine.snapshot().peers.is_empty(), "un appareil d'une autre version ne doit pas être utilisable");
 
     // Version plus récente, qui donne son numéro.
-    send("magicplus/9", r#","appVersion":"0.9.1""#);
-    wait_for("avertissement 0.9.1", Duration::from_secs(5), || {
+    wait_for("avertissement 0.9.1", Duration::from_secs(10), || {
+        send("magicplus/9", r#","appVersion":"0.9.1""#);
         engine.snapshot().other_versions.first().is_some_and(|o| o.version == "0.9.1" && o.newer)
     });
     assert!(engine.snapshot().status.contains("Mettez à jour cet appareil"));
