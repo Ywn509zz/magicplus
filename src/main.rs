@@ -2,6 +2,7 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod shared;
+mod themes;
 #[cfg(all(target_os = "macos", not(feature = "slint-on-mac")))]
 mod ui_mac;
 #[cfg(any(not(target_os = "macos"), feature = "slint-on-mac"))]

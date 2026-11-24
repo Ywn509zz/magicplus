@@ -1,7 +1,8 @@
 //! Page « Discussions » de l'interface Slint (Windows) : relie le global `ChatData`
 //! (ui/chat.slint) au moteur. Mêmes fonctions que la page AppKit du Mac (src/ui_mac_chat.rs).
 
-use super::{AppWindow, AttachmentItem, ChatData, ChoiceItem, ConversationItem, MemberItem, MessageItem, ReactionItem, StickerItem};
+use super::{emoji::{self, Customs}, AppWindow, AttachmentItem, ChatData, ChoiceItem, ConversationItem, EmojiCell, GifItem, MemberItem, MessageItem, ReactionItem, StickerItem};
+use magicplus_core::{GifResult, Presence};
 use crate::shared::{avatar_hue, initials, jumbo, open_path, time_label};
 use magicplus_core::{
     markdown, protocol::MAX_ATTACHMENTS, util::format_size, AttachmentKind, AttachmentView, ConversationKind, ConversationView,
@@ -26,7 +27,6 @@ const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 const PENDING_SHOWN: usize = 4;
 /// Mémoire maximale des images d'un GIF ; au-delà, une image sur deux (puis trois…) est gardée.
 const GIF_BUDGET_BYTES: usize = 24 * 1024 * 1024;
-const MAX_GIF_FRAMES: usize = 500;
 
 // ------------------------------------------------------------------ images et GIF
 
@@ -36,6 +36,8 @@ enum Frame {
     Photo,
     Sticker,
     Thumb,
+    /// Aperçu d'un GIF de GIPHY dans le sélecteur.
+    GifTile,
 }
 
 impl Frame {
@@ -45,6 +47,7 @@ impl Frame {
             Frame::Photo => (360.0, 270.0),
             Frame::Sticker => (150.0, 150.0),
             Frame::Thumb => (68.0, 68.0),
+            Frame::GifTile => (200.0, 160.0),
         }
     }
 }
@@ -52,6 +55,13 @@ impl Frame {
 type VisualKey = (PathBuf, Frame);
 /// Images décodées par le fil de travail, en attente d'être rangées par l'interface.
 type DecodedInbox = Arc<Mutex<Vec<(VisualKey, Option<Decoded>)>>>;
+
+/// Nouvelles de la recherche GIPHY (fils de travail → interface), avec leur numéro de recherche.
+enum GifNews {
+    Item(u64, GifResult, Option<Decoded>),
+    Status(u64, String),
+}
+type GifInbox = Arc<Mutex<Vec<GifNews>>>;
 
 /// Image décodée dans le fil de travail (envoyable d'un fil à l'autre).
 struct Decoded {
@@ -85,35 +95,29 @@ fn pixel_buffer(image: &image::RgbaImage) -> SharedPixelBuffer<Rgba8Pixel> {
     SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(image.as_raw(), image.width(), image.height())
 }
 
-/// Décode une image ou toutes les images d'un GIF, réduites à leur taille d'affichage.
+/// Décode une image ou toutes les images d'une animation (GIF ou PNG animé), réduites à
+/// leur taille d'affichage.
 fn decode(path: &Path, frame: Frame) -> Option<Decoded> {
-    use image::{imageops::FilterType, AnimationDecoder, ImageFormat, ImageReader};
-    let reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
-    if reader.format() == Some(ImageFormat::Gif) {
-        let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
-        let decoder = image::codecs::gif::GifDecoder::new(file).ok()?;
-        let mut images = Vec::new();
-        let mut total_ms: u64 = 0;
-        let mut size = None;
-        for next in decoder.into_frames().take(MAX_GIF_FRAMES) {
-            let Ok(gif_frame) = next else { break };
-            let (numer, denom) = gif_frame.delay().numer_denom_ms();
-            total_ms += numer.checked_div(denom).map_or(100, |ms| ms.max(20)) as u64;
-            let buffer = gif_frame.into_buffer();
-            let (w, h) = *size.get_or_insert_with(|| {
-                let (w, h) = fit(buffer.width(), buffer.height(), frame.bounds());
-                (w.round() as u32, h.round() as u32)
-            });
-            images.push(if buffer.dimensions() == (w, h) { buffer } else { image::imageops::resize(&buffer, w, h, FilterType::Triangle) });
-        }
-        let (w, h) = size?;
+    use image::imageops::FilterType;
+    let bytes = std::fs::read(path).ok()?;
+    if let Some(frames) = magicplus_core::animation::frames(&bytes) {
+        let first = &frames[0].image;
+        let (w, h) = fit(first.width(), first.height(), frame.bounds());
+        let (w, h) = (w.round() as u32, h.round() as u32);
         let per_frame = (w * h * 4) as usize;
-        let step = (per_frame * images.len()).div_ceil(GIF_BUDGET_BYTES).max(1);
-        let kept: Vec<_> = images.iter().step_by(step).map(pixel_buffer).collect();
-        let frame_ms = (total_ms / kept.len().max(1) as u64).clamp(20, 2000) as i32;
+        let step = (per_frame * frames.len()).div_ceil(GIF_BUDGET_BYTES).max(1);
+        let kept: Vec<_> = frames
+            .iter()
+            .step_by(step)
+            .map(|f| {
+                let image = &f.image;
+                if image.dimensions() == (w, h) { pixel_buffer(image) } else { pixel_buffer(&image::imageops::resize(image, w, h, FilterType::Triangle)) }
+            })
+            .collect();
+        let frame_ms = magicplus_core::animation::average_delay_ms(&frames, kept.len()) as i32;
         return Some(Decoded { frames: kept, frame_ms, width: w as f32, height: h as f32 });
     }
-    let image = reader.decode().ok()?;
+    let image = image::load_from_memory(&bytes).ok()?;
     let (w, h) = fit(image.width(), image.height(), frame.bounds());
     // Décodée au double de sa taille d'affichage pour rester nette sur les écrans à haute densité.
     let (max_w, max_h) = ((w * 2.0) as u32, (h * 2.0) as u32);
@@ -154,6 +158,11 @@ fn status_label(message: &MessageView) -> String {
 
 #[derive(Default)]
 struct State {
+    /// Recherche GIPHY affichée (les réponses d'une recherche plus ancienne sont ignorées).
+    gif_generation: u64,
+    gif_results: Vec<GifResult>,
+    /// Version des profils (donc des émojis personnalisés) vue par le sélecteur d'émojis.
+    emoji_profiles_seen: u64,
     current: Option<String>,
     seen_revision: u64,
     was_visible: bool,
@@ -185,6 +194,8 @@ pub struct Chat {
     conversations: Rc<VecModel<ConversationItem>>,
     messages: Rc<VecModel<MessageItem>>,
     stickers: Rc<VecModel<StickerItem>>,
+    gifs: Rc<VecModel<GifItem>>,
+    gif_inbox: GifInbox,
     decode_requests: mpsc::Sender<VisualKey>,
     decoded: DecodedInbox,
 }
@@ -210,6 +221,8 @@ impl Chat {
             conversations: Rc::new(VecModel::default()),
             messages: Rc::new(VecModel::default()),
             stickers: Rc::new(VecModel::default()),
+            gifs: Rc::new(VecModel::default()),
+            gif_inbox: Arc::new(Mutex::new(Vec::new())),
             decode_requests: sender,
             decoded,
         });
@@ -217,14 +230,186 @@ impl Chat {
         data.set_conversations(ModelRc::from(chat.conversations.clone()));
         data.set_messages(ModelRc::from(chat.messages.clone()));
         data.set_stickers(ModelRc::from(chat.stickers.clone()));
+        data.set_emoji_tabs(ModelRc::new(VecModel::from(emoji::tabs())));
+        data.set_gifs(ModelRc::from(chat.gifs.clone()));
+        data.set_giphy_ready(chat.engine.giphy_key().is_some());
         install(&chat, &data);
+        chat.refresh_emoji_rows();
         chat
+    }
+
+    /// Lignes du sélecteur d'émojis (onglet ou recherche en cours).
+    fn refresh_emoji_rows(&self) {
+        let Some(ui) = self.ui() else { return };
+        let data = ui.global::<ChatData>();
+        let rows = emoji::rows(&self.engine, data.get_emoji_tab().max(0) as usize, &data.get_emoji_search());
+        data.set_emoji_rows(ModelRc::new(VecModel::from(rows)));
+        let mut st = self.state.borrow_mut();
+        st.emoji_profiles_seen = self.engine.profiles_revision();
+    }
+
+    /// Émoji choisi : ajouté au message en cours, ou en réaction au message visé.
+    fn emoji_picked(&self, cell: &EmojiCell, reaction: bool) {
+        let Some(ui) = self.ui() else { return };
+        let data = ui.global::<ChatData>();
+        let token = cell.token.to_string();
+        if reaction {
+            self.toggle_reaction(data.get_actions_index(), &token);
+        } else {
+            // Dans la zone de saisie, un émoji personnalisé s'écrit « :nom: ».
+            let text = if cell.text.is_empty() { magicplus_core::emoji::display_text(&token) } else { token.clone() };
+            let draft = data.get_draft().to_string();
+            let spaced = if cell.text.is_empty() && !draft.is_empty() && !draft.ends_with(' ') { format!(" {text} ") } else if cell.text.is_empty() { format!("{text} ") } else { text };
+            data.set_draft(format!("{draft}{spaced}").into());
+        }
+        self.engine.note_emoji_used(&token);
+        if data.get_emoji_tab() == 0 && data.get_emoji_search().is_empty() {
+            self.refresh_emoji_rows();
+        }
+    }
+
+    /// Recherche GIPHY (onglet 0 : tendances ou `gif-query` ; onglet 1 : favoris), en arrière-plan.
+    fn gif_search(&self) {
+        let Some(ui) = self.ui() else { return };
+        let data = ui.global::<ChatData>();
+        let generation = {
+            let mut st = self.state.borrow_mut();
+            st.gif_generation += 1;
+            st.gif_results.clear();
+            st.gif_generation
+        };
+        self.gifs.set_vec(Vec::new());
+        let favorites_tab = data.get_gif_tab() == 1;
+        let query = data.get_gif_query().to_string();
+        data.set_gif_status(if favorites_tab { "Favoris…" } else { "Recherche…" }.into());
+        let engine = self.engine.clone();
+        let inbox = self.gif_inbox.clone();
+        std::thread::spawn(move || {
+            let results = if favorites_tab { Ok(engine.gif_favorites()) } else { engine.giphy_search(&query, 0) };
+            let results = match results {
+                Ok(results) => results,
+                Err(error) => {
+                    lock_inbox(&inbox).push(GifNews::Status(generation, error.to_string()));
+                    return;
+                }
+            };
+            let status = match (results.is_empty(), favorites_tab) {
+                (true, true) => "Aucun favori : survolez un GIF et cliquez sur ☆".to_string(),
+                (true, false) => "Aucun GIF trouvé".to_string(),
+                (false, _) => format!("{} GIF", results.len()),
+            };
+            lock_inbox(&inbox).push(GifNews::Status(generation, status));
+            // Aperçus téléchargés et décodés à plusieurs, affichés dès qu'ils sont prêts.
+            let queue = Arc::new(Mutex::new(results.into_iter().collect::<std::collections::VecDeque<_>>()));
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    let (engine, inbox, queue) = (engine.clone(), inbox.clone(), queue.clone());
+                    std::thread::spawn(move || loop {
+                        let next = queue.lock().ok().and_then(|mut q| q.pop_front());
+                        let Some(gif) = next else { break };
+                        let decoded = engine.giphy_preview(&gif).ok().and_then(|path| decode(&path, Frame::GifTile));
+                        lock_inbox(&inbox).push(GifNews::Item(generation, gif, decoded));
+                    })
+                })
+                .collect();
+            for worker in workers {
+                let _ = worker.join();
+            }
+        });
+    }
+
+    /// Range les aperçus GIPHY arrivés pour la recherche en cours.
+    fn collect_gifs(&self, ui: &AppWindow) {
+        let news: Vec<GifNews> = std::mem::take(&mut *lock_inbox(&self.gif_inbox));
+        if news.is_empty() {
+            return;
+        }
+        let data = ui.global::<ChatData>();
+        let favorites: Vec<String> = self.engine.gif_favorites().into_iter().map(|g| g.id).collect();
+        let mut st = self.state.borrow_mut();
+        for item in news {
+            match item {
+                GifNews::Status(generation, text) if generation == st.gif_generation => data.set_gif_status(text.into()),
+                GifNews::Item(generation, gif, Some(decoded)) if generation == st.gif_generation => {
+                    let frames: Vec<slint::Image> = decoded.frames.into_iter().map(slint::Image::from_rgba8).collect();
+                    self.gifs.push(GifItem {
+                        id: gif.id.clone().into(),
+                        title: gif.title.clone().into(),
+                        image: frames.first().cloned().unwrap_or_default(),
+                        frames: ModelRc::new(VecModel::from(if frames.len() > 1 { frames } else { Vec::new() })),
+                        frame_ms: decoded.frame_ms,
+                        favorite: favorites.contains(&gif.id),
+                    });
+                    st.gif_results.push(gif);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// GIF choisi : téléchargé puis envoyé dans la conversation affichée (en arrière-plan).
+    fn gif_send(&self, id: &str) {
+        let gif = self.state.borrow().gif_results.iter().find(|g| g.id == id).cloned();
+        let (Some(gif), Some(conversation)) = (gif, self.current()) else { return };
+        let engine = self.engine.clone();
+        engine.set_status("Envoi du GIF…");
+        std::thread::spawn(move || {
+            if let Err(error) = engine.send_giphy(&conversation, &gif) {
+                engine.set_status(format!("GIF non envoyé : {error}"));
+            }
+        });
+    }
+
+    fn gif_favorite(&self, id: &str) {
+        let Some(ui) = self.ui() else { return };
+        let gif = self.state.borrow().gif_results.iter().find(|g| g.id == id).cloned();
+        let Some(gif) = gif else { return };
+        let favorite = self.engine.toggle_gif_favorite(&gif);
+        let on_favorites_tab = ui.global::<ChatData>().get_gif_tab() == 1;
+        for index in 0..self.gifs.row_count() {
+            if let Some(mut item) = self.gifs.row_data(index).filter(|item| item.id == id) {
+                if on_favorites_tab && !favorite {
+                    self.gifs.remove(index);
+                    self.state.borrow_mut().gif_results.retain(|g| g.id != id);
+                } else {
+                    item.favorite = favorite;
+                    self.gifs.set_row_data(index, item);
+                }
+                break;
+            }
+        }
+    }
+
+    /// Nouvel émoji personnalisé : image choisie, préparée hors du fil de l'interface.
+    fn emoji_add(&self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Nouvel émoji personnalisé (le nom vient du fichier)")
+            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
+            .pick_file();
+        let Some(path) = picked else { return };
+        let engine = self.engine.clone();
+        engine.set_status("Préparation de l'émoji…");
+        std::thread::spawn(move || match engine.add_custom_emoji(&path, None) {
+            Ok(added) => engine.set_status(format!("Émoji :{}: ajouté : vos contacts le recevront avec votre profil", added.name)),
+            Err(error) => engine.set_status(format!("Émoji refusé : {error}")),
+        });
+        if let Some(ui) = self.ui() {
+            let data = ui.global::<ChatData>();
+            data.set_emoji_tab(1);
+            data.set_emoji_search("".into());
+        }
     }
 
     /// Photo de profil d'un appareil (fixe), s'il en a une.
     fn photo_of(&self, id: &str, size: u32) -> Option<slint::Image> {
         let path = self.engine.profile(id)?.avatar?;
         super::images::still(&path, size)
+    }
+
+    /// Photo de profil avec ses images si elle est animée.
+    fn picture_of(&self, id: &str, size: u32) -> Option<super::images::Picture> {
+        let path = self.engine.profile(id)?.avatar?;
+        super::images::picture(&path, size)
     }
 
     /// Carte de profil : remplie puis affichée par la page.
@@ -256,7 +441,8 @@ impl Chat {
 
     /// Une GIF est affichée : l'animation doit avancer.
     pub fn animating(&self) -> bool {
-        self.state.borrow().animated
+        let st = self.state.borrow();
+        st.animated || !st.gif_results.is_empty()
     }
 
     /// Appelé toutes les 150 ms : ne refait l'affichage que si quelque chose a changé.
@@ -277,6 +463,12 @@ impl Chat {
             self.scroll_to_bottom(&ui);
         } else if due {
             self.refresh(&ui, false);
+        }
+        self.collect_gifs(&ui);
+        // Émojis personnalisés ajoutés, retirés ou reçus : le sélecteur suit.
+        let emoji_due = self.state.borrow().emoji_profiles_seen != self.engine.profiles_revision();
+        if emoji_due {
+            self.refresh_emoji_rows();
         }
     }
 
@@ -372,12 +564,16 @@ impl Chat {
             let names: Vec<String> = conversation
                 .members
                 .iter()
-                .map(|m| if m.me { "vous".to_string() } else if m.online { m.name.clone() } else { format!("{} (hors ligne)", m.name) })
+                .map(|m| match m.presence {
+                    _ if m.me => "vous".to_string(),
+                    Presence::Online => m.name.clone(),
+                    other => format!("{} ({})", m.name, other.label().to_lowercase()),
+                })
                 .collect();
             format!("{} membres · {}", conversation.members.len(), names.join(", "))
         } else {
             match others.first() {
-                Some(member) if member.online => "En ligne · chiffré de bout en bout".to_string(),
+                Some(member) if member.online => format!("{} · chiffré de bout en bout", member.presence.label()),
                 Some(_) => "Hors ligne · les messages partiront à son retour".to_string(),
                 None => String::new(),
             }
@@ -392,6 +588,7 @@ impl Chat {
         data.set_peer_id(if group { "".into() } else { seed.clone().into() });
         data.set_is_group(group);
         data.set_online(others.iter().any(|m| m.online));
+        data.set_presence(if group { 0 } else { others.first().map_or(0, |m| m.presence.code()) });
         data.set_is_creator(conversation.is_creator);
         data.set_closed(conversation.closed);
         let members: Vec<MemberItem> = conversation
@@ -399,7 +596,7 @@ impl Chat {
             .iter()
             .map(|m| {
                 use magicplus_core::FriendState;
-                let presence = if m.me { "vous" } else if m.online { "en ligne" } else { "hors ligne" };
+                let presence = if m.me { "vous".to_string() } else { m.presence.label().to_lowercase() };
                 let (relation, friend) = match m.friend {
                     FriendState::None => ("", 0),
                     FriendState::Me => ("", 1),
@@ -448,7 +645,7 @@ impl Chat {
         let signature: String = conversations
             .iter()
             .map(|c| {
-                let online = c.members.iter().any(|m| !m.me && m.online);
+                let online = c.members.iter().map(|m| m.presence.code().to_string()).collect::<String>();
                 format!(
                     "{}|{}|{}|{}|{}|{}|{}|{}\n",
                     c.id, c.title, c.unread, c.last_preview, c.typing.is_empty(), online, current == Some(c.id.as_str()), profiles_revision
@@ -471,6 +668,7 @@ impl Chat {
                     unread: c.unread as i32,
                     group,
                     online: c.members.iter().any(|m| !m.me && m.online),
+                    presence: if group { 0 } else { c.members.iter().find(|m| !m.me).map_or(0, |m| m.presence.code()) },
                     typing: !c.typing.is_empty(),
                     selected: current == Some(c.id.as_str()),
                     initials: initials(&c.title).into(),
@@ -508,6 +706,7 @@ impl Chat {
             .collect();
 
         let profiles_revision = self.engine.profiles_revision();
+        let customs = emoji::customs(&self.engine);
         let mut rendered: Vec<(String, Option<MessageItem>)> = Vec::with_capacity(messages.len());
         let mut animated = false;
         for (index, message) in messages.iter().enumerate() {
@@ -533,8 +732,9 @@ impl Chat {
             );
             let unchanged = !force && st.signatures.get(index) == Some(&signature);
             let item = (!unchanged).then(|| {
-                message_item(message, headers[index], Some(index) == last_mine, attachments.into_iter().map(|(item, _)| item).collect())
-                    .with_photo(self.photo_of(&message.author_id, 76))
+                message_item(message, headers[index], Some(index) == last_mine, attachments.into_iter().map(|(item, _)| item).collect(), &customs)
+                    .with_picture(self.picture_of(&message.author_id, 76))
+                    .with_reply_photo(message.reply.as_ref().and_then(|r| self.photo_of(&r.author_id, 32)))
             });
             rendered.push((signature, item));
         }
@@ -561,8 +761,9 @@ impl Chat {
                     item.take().unwrap_or_else(|| {
                         let message = &messages[index];
                         let attachments = message.attachments.iter().map(|a| self.attachment_item(&mut st, a).0).collect();
-                        message_item(message, headers[index], Some(index) == last_mine, attachments)
-                            .with_photo(self.photo_of(&message.author_id, 76))
+                        message_item(message, headers[index], Some(index) == last_mine, attachments, &customs)
+                            .with_picture(self.picture_of(&message.author_id, 76))
+                    .with_reply_photo(message.reply.as_ref().and_then(|r| self.photo_of(&r.author_id, 32)))
                     })
                 })
                 .collect();
@@ -574,7 +775,7 @@ impl Chat {
         st.visuals.retain(|key, visual| used.contains(key) || matches!(visual, Visual::Loading));
         st.used = used;
         st.has_progress = messages.iter().any(|m| m.attachments.iter().any(|a| a.path.is_none()));
-        st.animated = animated || st.sticker_signature.contains("gif");
+        st.animated = animated || st.sticker_signature.contains("gif") || customs.values().any(|c| c.animated);
         st.signatures = rendered.into_iter().map(|(signature, _)| signature).collect();
         st.messages = messages;
     }
@@ -797,7 +998,7 @@ impl Chat {
     fn start_edit(&self, message: &MessageView) {
         let Some(ui) = self.ui() else { return };
         let data = ui.global::<ChatData>();
-        data.set_draft(message.text.clone().into());
+        data.set_draft(magicplus_core::emoji::display_text(&message.text).into());
         {
             let mut st = self.state.borrow_mut();
             st.reply_to = None;
@@ -879,6 +1080,7 @@ impl Chat {
     }
 
     fn toggle_reaction(&self, index: i32, emoji: &str) {
+        self.engine.note_emoji_used(emoji);
         let (message, conversation) = {
             let st = self.state.borrow();
             (st.messages.get(index.max(0) as usize).map(|m| m.id.clone()), st.current.clone())
@@ -1072,7 +1274,7 @@ impl Chat {
     fn add_sticker(&self) {
         let picked = rfd::FileDialog::new()
             .set_title("Image ou GIF pour un autocollant")
-            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
             .pick_file();
         if let Some(path) = picked {
             match self.engine.add_sticker(&path) {
@@ -1089,13 +1291,19 @@ impl Chat {
     }
 }
 
-fn message_item(message: &MessageView, header: bool, last_mine: bool, attachments: Vec<AttachmentItem>) -> MessageItem {
+fn message_item(message: &MessageView, header: bool, last_mine: bool, attachments: Vec<AttachmentItem>, customs: &Customs) -> MessageItem {
+    // Émojis personnalisés : en grand (émojis seuls), dans la ligne (texte simple), sinon « :nom: ».
+    let shown = magicplus_core::emoji::display_text(&message.text);
+    let big = if message.deleted || message.system { Vec::new() } else { emoji::big_emojis(&message.text, customs) };
+    let inline = if message.deleted || message.system || !big.is_empty() { Vec::new() } else { emoji::inline_pieces(&message.text, customs) };
     let status = if message.mine && (last_mine || message.status == MessageStatus::Sending) { status_label(message) } else { String::new() };
     MessageItem {
         id: message.id.clone().into(),
         author_id: message.author_id.clone().into(),
         has_photo: false,
         photo: Default::default(),
+        photo_frames: Default::default(),
+        photo_frame_ms: 0,
         author: if message.system { markdown::plain(&message.text).into() } else { message.author_name.clone().into() },
         initials: initials(&message.author_name).into(),
         color: avatar_color(&message.author_id),
@@ -1103,22 +1311,43 @@ fn message_item(message: &MessageView, header: bool, last_mine: bool, attachment
         system: message.system,
         header,
         time: time_label(message.sent_ms).into(),
-        blocks: if message.deleted || message.system { ModelRc::default() } else { super::markdown::blocks(&message.text) },
-        plain: message.text.trim().into(),
+        blocks: if message.deleted || message.system { ModelRc::default() } else { super::markdown::blocks(&shown) },
+        plain: shown.trim().into(),
         has_code: !message.deleted && super::markdown::code_of(&message.text).is_some(),
         pinned_by: message.pinned_by.clone().unwrap_or_default().into(),
         forwarded: message.forwarded.clone().unwrap_or_default().into(),
         has_text: !message.text.trim().is_empty() && !message.deleted,
         deleted: message.deleted,
         edited: message.edited,
-        jumbo: jumbo(&message.text),
-        reply: message.reply.as_ref().map(|r| format!("{} : {}", r.author_name, r.excerpt)).unwrap_or_default().into(),
+        jumbo: jumbo(&shown) || !big.is_empty(),
+        big_emojis: ModelRc::new(VecModel::from(big)),
+        inline: ModelRc::new(VecModel::from(inline)),
+        has_reply: message.reply.is_some(),
+        reply: message.reply.as_ref().map(|r| r.excerpt.clone()).unwrap_or_default().into(),
+        reply_author: message.reply.as_ref().map(|r| r.author_name.clone()).unwrap_or_default().into(),
+        reply_author_id: message.reply.as_ref().map(|r| r.author_id.clone()).unwrap_or_default().into(),
+        reply_photo: Default::default(),
+        reply_has_photo: false,
+        reply_initials: message.reply.as_ref().map(|r| initials(&r.author_name)).unwrap_or_default().into(),
+        reply_color: message.reply.as_ref().map(|r| avatar_color(&r.author_id)).unwrap_or_default(),
         attachments: ModelRc::new(VecModel::from(attachments)),
         reactions: ModelRc::new(VecModel::from(
             message
                 .reactions
                 .iter()
-                .map(|r| ReactionItem { emoji: r.emoji.clone().into(), count: r.count as i32, mine: r.mine, names: r.names.join(", ").into() })
+                .map(|r| {
+                    let picture = emoji::reaction_picture(&r.emoji, customs);
+                    ReactionItem {
+                        emoji: magicplus_core::emoji::display_text(&r.emoji).into(),
+                        count: r.count as i32,
+                        mine: r.mine,
+                        names: r.names.join(", ").into(),
+                        custom: picture.is_some(),
+                        frame_ms: picture.as_ref().map_or(0, |p| p.frame_ms),
+                        frames: ModelRc::new(VecModel::from(picture.as_ref().map(|p| p.frames.clone()).unwrap_or_default())),
+                        image: picture.map(|p| p.still).unwrap_or_default(),
+                    }
+                })
                 .collect::<Vec<_>>(),
         )),
         status: status.into(),
@@ -1157,6 +1386,40 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
     on!(on_edit_last, |chat| chat.edit_last());
     on!(on_message_action, |chat, index, action| chat.message_action(index, &action));
     on!(on_toggle_reaction, |chat, index, emoji| chat.toggle_reaction(index, &emoji));
+    on!(on_emoji_filter_changed, |chat| chat.refresh_emoji_rows());
+    on!(on_emoji_picked, |chat, cell, reaction| chat.emoji_picked(&cell, reaction));
+    on!(on_emoji_favorite, |chat, cell| {
+        chat.engine.toggle_favorite_emoji(&cell.token);
+        chat.refresh_emoji_rows();
+    });
+    on!(on_emoji_add, |chat| chat.emoji_add());
+    on!(on_gif_search, |chat| chat.gif_search());
+    on!(on_gif_send, |chat, id| chat.gif_send(&id));
+    on!(on_gif_favorite, |chat, id| chat.gif_favorite(&id));
+    on!(on_open_giphy_signup, |chat| open_path("https://developers.giphy.com/dashboard/"));
+    on!(on_gif_save_key, |chat, key| {
+        match chat.engine.set_giphy_key(&key) {
+            Ok(()) => {
+                let ready = chat.engine.giphy_key().is_some();
+                if let Some(ui) = chat.ui() {
+                    ui.global::<ChatData>().set_giphy_ready(ready);
+                }
+                if ready {
+                    chat.status("Clé GIPHY enregistrée".to_string());
+                    chat.gif_search();
+                }
+            }
+            Err(error) => chat.status(error.to_string()),
+        }
+    });
+    on!(on_emoji_remove, |chat, cell| {
+        if let [magicplus_core::emoji::Piece::Custom { id, .. }] = magicplus_core::emoji::pieces(&cell.token).as_slice() {
+            match chat.engine.remove_custom_emoji(id) {
+                Ok(()) => chat.status("Émoji supprimé".to_string()),
+                Err(error) => chat.status(error.to_string()),
+            }
+        }
+    });
     on!(on_open_path, |chat, path| {
         if !path.is_empty() {
             open_path(&path);
@@ -1275,10 +1538,34 @@ impl WithPhoto for MessageItem {
     }
 }
 
+impl MessageItem {
+    /// Photo de l'auteur (animée au survol si c'est un GIF).
+    fn with_picture(mut self, picture: Option<super::images::Picture>) -> Self {
+        self.has_photo = picture.is_some();
+        if let Some(picture) = picture {
+            self.photo = picture.still;
+            self.photo_frame_ms = picture.frame_ms;
+            self.photo_frames = ModelRc::new(VecModel::from(picture.frames));
+        }
+        self
+    }
+
+    /// Petite photo de l'auteur du message cité (réponse).
+    fn with_reply_photo(mut self, photo: Option<slint::Image>) -> Self {
+        self.reply_has_photo = photo.is_some();
+        self.reply_photo = photo.unwrap_or_default();
+        self
+    }
+}
+
 impl WithPhoto for ConversationItem {
     fn with_photo(mut self, photo: Option<slint::Image>) -> Self {
         self.has_photo = photo.is_some();
         self.photo = photo.unwrap_or_default();
         self
     }
+}
+
+fn lock_inbox(inbox: &GifInbox) -> std::sync::MutexGuard<'_, Vec<GifNews>> {
+    inbox.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

@@ -8,7 +8,8 @@ serveur, pas de compte, pas d'Internet. Application 100 % Rust.
 - **Windows** (et Linux) : interface **Slint** au style Fluent (Windows 11).
 - Les deux interfaces utilisent **le même moteur** : un Mac et un PC se parlent normalement.
 - Code et versions publiées : <https://github.com/Ywn509zz/magicplus>. Les apps installées y
-  cherchent seules leurs mises à jour (seul usage d'Internet, désactivable).
+  cherchent seules leurs mises à jour (usage d'Internet désactivable). La recherche de GIF (GIPHY,
+  avec une clé d'API à fournir) est l'autre usage d'Internet, seulement quand on l'ouvre.
 
 ---
 
@@ -423,7 +424,17 @@ Comme sur Discord : photo de profil (fixe ou GIF animé), bannière (image ou co
 
 - **Réglages** : Paramètres → Mon profil (aperçu de la carte, photo, bannière, couleur, pronoms,
   présentation). Une image choisie est recadrée au centre et réduite (photo 256 × 256 en PNG,
-  bannière 960 × 384 en JPEG) ; un GIF assez léger (1,5 Mo photo, 2,4 Mo bannière) reste animé.
+  bannière 960 × 384 en JPEG). Une animation (GIF ou PNG animé) reste animée : réencodée en GIF
+  (photo 160 × 160, bannière 600 × 240, moins d'images ou plus petite si besoin) pour tenir dans
+  1,5 Mo (photo) ou 2,4 Mo (bannière) ; un GIF déjà léger est gardé tel quel (`src/animation.rs`).
+  Windows : animée sur la carte de profil, et au survol d'un message (comme Discord).
+- **Émojis personnalisés** (`src/emoji.rs`) : 60 au plus, carrés de 96 px (PNG, ou GIF s'ils sont
+  animés, 512 Ko au plus). `ProfileInfo.emojis` en donne la liste (nom, id = 12 chiffres hexa du
+  SHA-256, format, taille) ; les images, trop lourdes pour la trame du profil (4 Mo), sont demandées
+  ensuite une à une par le contact (`emoji-fetch`, réponse en base64, servie seulement aux contacts),
+  vérifiées puis rangées dans `profils/<id>/emojis/`. Dans un message ou une réaction, un émoji
+  s'écrit `<:nom:id>` (comme Discord) ; la saisie montre `:nom:`, transformé à l'envoi
+  (`encode_shortcodes`, nos émojis d'abord). Ailleurs (aperçus, Markdown complexe) : `:nom:`.
 - **Diffusion** : message `profile` (en-tête `ProfileInfo` : version, textes, couleur, et pour chaque
   image son format, sa taille et son SHA-256 ; les octets des images suivent l'en-tête). Chaque
   appareil l'envoie lui-même à ses **contacts** : appareils associés et membres de ses groupes
@@ -434,6 +445,40 @@ Comme sur Discord : photo de profil (fixe ou GIF animé), bannière (image ou co
   décodables), rangées dans `profils/<id>/`. Une version plus ancienne est ignorée.
 - **Affichage** : photo ronde dans les messages, la liste des discussions et l'en-tête ; clic sur
   une photo → carte de profil (bannière, photo, pronoms, présentation, « Discuter »).
+
+### Émojis, GIF et thèmes
+
+- **Sélecteur d'émojis** : tout le catalogue Unicode 15 (crate `emojis`), par catégories, avec
+  recherche (noms anglais et codes courts), **favoris** (clic droit ou ☆ sous Windows, ⌥-clic sur
+  Mac) et **récents**, gardés sur l'appareil (`emojis.json`), et les émojis personnalisés (les nôtres
+  et ceux des contacts ; bouton + pour en ajouter). Le même sélecteur sert à réagir. Mac : bulle avec
+  favoris, récents, personnalisés et courants ; le reste via le visualiseur de caractères de macOS.
+- **Messages** : émojis seuls → en grand (images animées pour les personnalisés) ; texte simple avec
+  émojis personnalisés → images dans la ligne (Windows) ; sinon `:nom:` dans le Markdown.
+- **GIF de GIPHY** (`src/giphy.rs`) : bouton « GIF » de la zone de saisie ; tendances, recherche
+  (`curl`, HTTPS, réponses et adresses de GIPHY seulement) et **favoris** (étoile sous Windows,
+  ⌥-clic sur Mac ; `gif-favoris.json`, aperçus dans `giphy/apercus/`). Le GIF choisi est téléchargé
+  (`giphy/envois/`) puis envoyé comme une pièce jointe : les contacts le reçoivent en direct. Clé
+  d'API gratuite (developers.giphy.com) saisie dans la bulle (`settings.json` : `giphy_key`) ou
+  variable `MAGICPLUS_GIPHY_KEY`.
+- **Thèmes** (`src/themes.rs`) : Système, Clair, Sombre (couleurs Fluent) et 11 palettes (Graphite,
+  Onyx, Nuit bleue, Améthyste, Forêt, Braise, Océan, Sakura, Menthe, Sable). Windows : Paramètres →
+  Apparence (pastilles), palette complète via `Theme.custom`/`Theme.colors` (`ui/theme.slint`). Mac :
+  apparence claire ou sombre et fond des fenêtres (`settings.json` : `theme`).
+- **Présence** (`src/presence.rs`) : En ligne, Inactif, Ne pas déranger, Invisible (Windows : panneau
+  « moi » en bas de la barre latérale ; Mac : Paramètres → Statut et notifications). Annoncée dans
+  chaque `Hello` (`presence`) ; un invisible s'annonce `offline` : vu hors ligne, mais joignable (les
+  messages passent). « En ligne » devient « Inactif » après N minutes sans clavier ni souris
+  (`GetLastInputInfo` sous Windows, `CGEventSourceSecondsSinceLastEventType` sur Mac ; réglage
+  `auto_idle_minutes`, 10 par défaut). Pastilles comme Discord : verte, lune jaune, rouge barrée, grise.
+- **Préférences des notifications** (`settings.notifications`, `src/presence.rs`) : activées,
+  discussions à deux, groupes (tous / mentions « @pseudo », « @nom », « @tous » / jamais), texte du
+  message, son, même quand la discussion est affichée. Appliquées par `Inner::notify` à chaque `Notice`
+  (genre `NoticeKind` : discussion à deux, groupe avec ou sans mention, autre) ; rien en « ne pas
+  déranger ». L'affichage reste celui de l'arrière-plan (bulle de l'icône sous Windows, centre de
+  notifications sur Mac). L'ancien réglage booléen de la 0.11 est encore lu.
+- **Discussions façon Discord** : texte sans bulle sur toute la largeur ; une réponse montre au-dessus
+  du message un trait courbe, la petite photo et le @nom de l'auteur cité, et le début de son message.
 
 ### Versions et mises à jour — `src/update.rs`, `.github/workflows/`
 
@@ -517,10 +562,11 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | --- | --- |
 | `identity.json` | id, nom, plateforme, clé publique et **clé secrète** |
 | `trusted.json` | appareils associés (id, nom, plateforme, clé publique) |
-| `settings.json` | dossier de réception, durée de reprise, copie automatique du texte reçu, thème (Slint), adresses saisies à la main, recherche des mises à jour |
+| `settings.json` | dossier de réception, durée de reprise, copie automatique du texte reçu, thème, clé GIPHY, adresses saisies à la main, recherche des mises à jour |
+| `emojis.json`, `gif-favoris.json`, `giphy/` | émojis récents et favoris, GIF favoris, aperçus et GIF téléchargés de GIPHY |
 | `mise-a-jour/` | version téléchargée en attente d'installation (effacée au démarrage suivant) |
-| `profil/` | notre profil (`profil.json`, `avatar.*`, `banniere.*`) et les versions confirmées par chaque contact (`envois.json`) |
-| `profils/<id>/` | profils reçus des contacts |
+| `profil/` | notre profil (`profil.json`, `avatar.*`, `banniere.*`, `emojis/`) et les versions confirmées par chaque contact (`envois.json`) |
+| `profils/<id>/` | profils reçus des contacts (et leurs `emojis/`) |
 | `canevas/<conversation>.yjs` | canevas partagés de la conversation (document Yjs) |
 | `envois.json` | envois en attente ou à reprendre |
 | `partiels/` | fichiers en cours de réception (`<id>.part`) et leur description (`<id>.json`) |
@@ -546,7 +592,11 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/ui_mac_system.rs`, `src/ui_slint/tray.rs` | Arrière-plan : icône (barre des menus, zone de notification), notifications du système. |
 | `src/markdown.rs` | Markdown des messages (analyse, texte brut, réécriture pour Slint). |
 | `src/update.rs` | Mises à jour : recherche sur GitHub, téléchargement vérifié, remplacement de l'app. |
-| `src/profile.rs` | Profils : images, diffusion aux contacts, réception. |
+| `src/profile.rs` | Profils : images, émojis personnalisés, diffusion aux contacts, réception. |
+| `src/animation.rs` | Images animées (GIF, APNG) : décodage image par image, réencodage en GIF. |
+| `src/emoji.rs` | Émojis : catalogue Unicode, jetons `<:nom:id>`, préparation des émojis personnalisés, favoris et récents. |
+| `src/giphy.rs` | GIF de GIPHY : recherche, aperçus, envoi, favoris. |
+| `src/presence.rs` | Présence (en ligne, inactif, ne pas déranger, invisible), inactivité du système, règles des notifications. |
 | `src/canvas.rs` | Canevas partagés : document Yjs, synchronisation, versions, mise en forme. |
 | `src/highlight.rs` | Coloration des blocs de code. |
 | `src/ui_mac_markdown.rs`, `src/ui_mac_profile.rs`, `src/ui_mac_canvas.rs` | Mac : affichage du Markdown, profils (photos, carte, réglages), canevas. |
@@ -559,6 +609,9 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/util.rs` | Nom de la machine, tailles lisibles, noms de fichiers sûrs, destination unique. |
 | `src/main.rs` | Démarre le moteur puis l'interface de la plateforme. |
 | `src/shared.rs` | Commun aux interfaces : raccourcis globaux, ouvrir un fichier ou son dossier, heure locale, initiales. |
+| `src/themes.rs` | Thèmes de couleur communs aux deux interfaces. |
+| `src/ui_mac_gif.rs`, `src/ui_mac_menus.rs` | Mac : sélecteur de GIF ; menus, sélecteur d'émojis. |
+| `src/ui_slint/emoji.rs` | Windows : lignes du sélecteur d'émojis, émojis personnalisés dans les messages. |
 | `src/ui_mac.rs` + `src/ui_mac_chat.rs` | Interface macOS (AppKit via `objc2`) : barre latérale, 5 pages dont Discussions, alertes, menus. |
 | `src/ui_slint.rs` + `src/ui_slint/chat.rs` | Interface Windows/Linux (Slint) : pages, puis la page Discussions (modèles, images, actions). |
 | `ui/app.slint`, `ui/chat.slint`, `ui/theme.slint` | Fenêtre Slint (style Fluent), page Discussions, couleurs ; icônes dans `ui/icons`. |
@@ -573,12 +626,13 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | Variable | Effet |
 | --- | --- |
 | `MAGICPLUS_DATA_DIR=/chemin` | Autre dossier de données (seconde instance de test, captures). |
+| `MAGICPLUS_GIPHY_KEY=clé` | Clé d'API GIPHY (sinon : celle saisie dans l'app). |
 | `MAGICPLUS_PORTS=46454,46455` | Autres ports d'annonce et de connexion : une copie lancée à côté de la vraie, invisible des appareils du réseau. |
 | `MAGICPLUS_FAKE_FIREWALL=1` | Affiche l'avertissement du pare-feu Windows (captures). |
 | `MAGICPLUS_TEST_NOTICE=1` | Une notification d'essai 3 s après le démarrage. |
 | `MAGICPLUS_NO_BLUETOOTH=1` | Pas de Bluetooth (copie de développement à côté de la vraie). |
 | `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation, `MAGICPLUS_START_CANVAS=1` (ou `historique`) ses canevas. |
-| `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série. |
+| `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série (dont `emojis`, `emojis-perso`, `emojis-categorie`, `gifs`, `gifs-favoris`, `parametres`). La première capture d'une série n'ouvre pas les fenêtres surgissantes : en mettre une autre avant. |
 | `MAGICPLUS_DEMO_DIR=/dossier` | Avec `cargo test --test chat donnees_de_demo -- --ignored` : fabrique des discussions de démonstration. |
 | `--features slint-on-mac` | Développement : compile l'interface Windows (Slint) sur un Mac, par exemple `cargo build --features slint-on-mac --target-dir target/slint-mac`. Lent sur un Mac sans Metal ; sert à vérifier et photographier l'interface. |
 | `MAGICPLUS_DEBUG=1` | Windows/Linux : mesure les blocages de la boucle d'événements. |

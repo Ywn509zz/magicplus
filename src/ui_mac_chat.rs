@@ -23,7 +23,7 @@ use std::{
 pub(super) const CHAT_PAGE: usize = 1;
 pub(super) const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
 const MESSAGE_LIMIT: usize = 300;
-const MAX_BUBBLE: f64 = 520.0;
+const MAX_TEXT_WIDTH: f64 = 1100.0;
 /// Au-delà de cet écart, un nouveau message de la même personne affiche à nouveau son nom.
 const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 
@@ -31,7 +31,8 @@ const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Default)]
 pub(super) struct ShapeIvars {
-    /// Bulle : 0 neutre, 1 la nôtre, 2 ligne sélectionnée, 3 transparente. Avatar : teinte.
+    /// Bulle : 0 neutre, 1 la nôtre, 2 ligne sélectionnée, 3 transparente, 4 trait courbe d'une
+    /// réponse (comme Discord). Avatar : teinte.
     style: Cell<u8>,
     hue: Cell<f64>,
 }
@@ -48,6 +49,21 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             let color = match self.ivars().style.get() {
+                4 => {
+                    // Trait de réponse : monte du milieu bas vers le milieu, puis part à droite.
+                    let bounds = self.bounds();
+                    let (w, h) = (bounds.size.width, bounds.size.height);
+                    let mid = h / 2.0;
+                    let path = NSBezierPath::bezierPath();
+                    path.moveToPoint(NSPoint::new(1.0, 0.0));
+                    path.lineToPoint(NSPoint::new(1.0, mid - 5.0));
+                    path.curveToPoint_controlPoint1_controlPoint2(NSPoint::new(6.0, mid), NSPoint::new(1.0, mid), NSPoint::new(1.0, mid));
+                    path.lineToPoint(NSPoint::new(w, mid));
+                    path.setLineWidth(2.0);
+                    NSColor::tertiaryLabelColor().setStroke();
+                    path.stroke();
+                    return;
+                }
                 1 => NSColor::controlAccentColor().colorWithAlphaComponent(0.24),
                 2 => NSColor::controlAccentColor().colorWithAlphaComponent(0.16),
                 3 => return,
@@ -364,6 +380,8 @@ pub(super) fn build(controller: &Controller, mtm: MainThreadMarker) -> (Retained
     composer.addArrangedSubview(&input_scroll);
     let emoji = icon_button("face.smiling", "Émojis", sel!(chatEmoji:), controller, mtm);
     composer.addArrangedSubview(&emoji);
+    let gif = icon_button("photo.stack", "GIF (GIPHY)", sel!(chatGif:), controller, mtm);
+    composer.addArrangedSubview(&gif);
     let stickers_button = icon_button("sparkles.rectangle.stack", "Autocollants et GIF", sel!(chatStickers:), controller, mtm);
     composer.addArrangedSubview(&stickers_button);
     let send = button("Envoyer", sel!(chatSend:), controller, mtm);
@@ -509,7 +527,7 @@ impl Controller {
         let others: Vec<&magicplus_core::MemberView> = conversation.members.iter().filter(|m| !m.me).collect();
         let subtitle = match conversation.kind {
             ConversationKind::Direct => match others.first() {
-                Some(member) if member.online => "En ligne · chiffré de bout en bout".to_string(),
+                Some(member) if member.online => format!("{} · chiffré de bout en bout", member.presence.label()),
                 Some(_) => "Hors ligne · les messages partiront à son retour".to_string(),
                 None => String::new(),
             },
@@ -517,7 +535,11 @@ impl Controller {
                 let names: Vec<String> = conversation
                     .members
                     .iter()
-                    .map(|m| if m.me { "vous".to_string() } else if m.online { m.name.clone() } else { format!("{} (hors ligne)", m.name) })
+                    .map(|m| match m.presence {
+                        _ if m.me => "vous".to_string(),
+                        magicplus_core::Presence::Online => m.name.clone(),
+                        other => format!("{} ({})", m.name, other.label().to_lowercase()),
+                    })
                     .collect();
                 format!("{} membres · {}", conversation.members.len(), names.join(", "))
             }
@@ -707,8 +729,8 @@ impl Controller {
         if available < 100.0 {
             return 420.0;
         }
-        // avatar 36 + écarts + bouton « … » + marges de la bulle
-        (available - 120.0).clamp(220.0, MAX_BUBBLE)
+        // avatar 36 + écarts + bouton « … » (texte sans bulle, comme Discord)
+        (available - 96.0).clamp(220.0, MAX_TEXT_WIDTH)
     }
 
     fn scroll_messages_to_bottom(&self) {
@@ -755,12 +777,6 @@ impl Controller {
         }
 
         let column = stack(true, 3.0, mtm);
-        if let Some(reply) = &message.reply {
-            let quote = secondary(&format!("↪︎ {} : {}", reply.author_name, reply.excerpt), mtm);
-            quote.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            quote.widthAnchor().constraintLessThanOrEqualToConstant(ui.bubble_width).setActive(true);
-            column.addArrangedSubview(&quote);
-        }
         if header {
             let line = stack(false, 8.0, mtm);
             let name = strong(&message.author_name, 13.0, mtm);
@@ -779,12 +795,17 @@ impl Controller {
             note.setFont(Some(&NSFontManager::sharedFontManager(mtm).convertFont_toHaveTrait(&NSFont::systemFontOfSize(11.5), NSFontTraitMask::ItalicFontMask)));
             column.addArrangedSubview(&note);
         }
-        let (body, content) = bubble(if message.mine { 1 } else { 0 }, 7.0, 11.0, mtm);
+        // Texte sans bulle (comme Discord).
+        let (body, content) = bubble(3, 0.0, 0.0, mtm);
         let mut has_content = false;
         if message.deleted {
             let gone = secondary("Message supprimé", mtm);
             gone.setFont(Some(&NSFontManager::sharedFontManager(mtm).convertFont_toHaveTrait(&NSFont::systemFontOfSize(12.5), NSFontTraitMask::ItalicFontMask)));
             content.addArrangedSubview(&gone);
+            has_content = true;
+        } else if message.text.contains("<:") && magicplus_core::emoji::only_emojis(&message.text) {
+            // Émojis seuls, dont des personnalisés : en grand (les GIF s'animent).
+            content.addArrangedSubview(&self.big_emojis(&message.text, mtm));
             has_content = true;
         } else if jumbo(&message.text) {
             // Seulement des émojis : en grand, comme sur Discord.
@@ -793,7 +814,9 @@ impl Controller {
             content.addArrangedSubview(&text);
             has_content = true;
         } else if !message.text.is_empty() {
-            content.addArrangedSubview(&markdown_view(&message.text, 13.5, ui.bubble_width, mtm));
+            // Émojis personnalisés au milieu du texte : « :nom: ».
+            let shown = magicplus_core::emoji::display_text(&message.text);
+            content.addArrangedSubview(&markdown_view(&shown, 13.5, ui.bubble_width, mtm));
             has_content = true;
         }
         for attachment in &message.attachments {
@@ -812,7 +835,13 @@ impl Controller {
         if !message.reactions.is_empty() {
             let reactions = stack(false, 4.0, mtm);
             for reaction in &message.reactions {
-                let pill = button(&format!("{} {}", reaction.emoji, reaction.count), sel!(chatToggleReaction:), self, mtm);
+                let custom = self.custom_emoji_image(&reaction.emoji, 18.0);
+                let shown = if custom.is_some() { reaction.count.to_string() } else { format!("{} {}", magicplus_core::emoji::display_text(&reaction.emoji), reaction.count) };
+                let pill = button(&shown, sel!(chatToggleReaction:), self, mtm);
+                if let Some(image) = &custom {
+                    pill.setImage(Some(image));
+                    pill.setImagePosition(NSCellImagePosition::ImageLeft);
+                }
                 pill.setControlSize(NSControlSize::Small);
                 pill.setToolTip(Some(&ns(&reaction.names.join(", "))));
                 if reaction.mine {
@@ -850,12 +879,101 @@ impl Controller {
         let actions = icon_button("ellipsis", "Répondre, réagir, modifier…", sel!(chatMessageMenu:), self, mtm);
         actions.setTag(index as isize);
         row.addView_inGravity(&actions, NSStackViewGravity::Trailing);
+        let view = match &message.reply {
+            Some(reply) => self.with_reply_line(ui, row, reply, mtm),
+            None => Retained::into_super(row),
+        };
         // Clic droit sur le message : même menu stylisé.
         let right_click = unsafe {
             NSClickGestureRecognizer::initWithTarget_action(NSClickGestureRecognizer::alloc(mtm), Some(as_target(self)), Some(sel!(chatRowRightClick:)))
         };
         right_click.setButtonMask(0x2);
-        row.addGestureRecognizer(&right_click);
+        view.addGestureRecognizer(&right_click);
+        view
+    }
+
+    fn with_reply_line(&self, ui: &ChatUi, row: Retained<NSStackView>, reply: &magicplus_core::ReplyView, mtm: MainThreadMarker) -> Retained<NSView> {
+        // Réponse, comme Discord : au-dessus du message, un trait courbe part de la photo vers
+        // la petite photo de l'auteur cité, son @nom et le début de son message.
+        let whole = stack(true, 0.0, mtm);
+        whole.setAlignment(NSLayoutAttribute::Leading);
+        whole.setEdgeInsets(NSEdgeInsets { top: 8.0, left: 0.0, bottom: 0.0, right: 0.0 });
+        let line = stack(false, 0.0, mtm);
+        line.setAlignment(NSLayoutAttribute::CenterY);
+        let indent = NSView::new(mtm);
+        indent.setTranslatesAutoresizingMaskIntoConstraints(false);
+        indent.widthAnchor().constraintEqualToConstant(17.0).setActive(true);
+        indent.heightAnchor().constraintEqualToConstant(1.0).setActive(true);
+        line.addArrangedSubview(&indent);
+        let (spine, _) = bubble(4, 0.0, 0.0, mtm);
+        spine.widthAnchor().constraintEqualToConstant(27.0).setActive(true);
+        spine.heightAnchor().constraintEqualToConstant(20.0).setActive(true);
+        line.addArrangedSubview(&spine);
+        line.setCustomSpacing_afterView(2.0, &spine);
+        if !reply.author_id.is_empty() {
+            let photo = self.engine().profile(&reply.author_id).and_then(|p| p.avatar);
+            let picture = avatar(&reply.author_name, &reply.author_id, 16.0, photo.as_deref(), mtm);
+            line.addArrangedSubview(&picture);
+            line.setCustomSpacing_afterView(5.0, &picture);
+            let name = strong(&format!("@{}", reply.author_name), 12.5, mtm);
+            line.addArrangedSubview(&name);
+            line.setCustomSpacing_afterView(5.0, &name);
+        }
+        let excerpt = secondary(&reply.excerpt, mtm);
+        excerpt.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        excerpt.setContentCompressionResistancePriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        excerpt.widthAnchor().constraintLessThanOrEqualToConstant(ui.bubble_width).setActive(true);
+        line.addArrangedSubview(&excerpt);
+        whole.addArrangedSubview(&line);
+        row.setEdgeInsets(NSEdgeInsets { top: 0.0, left: 0.0, bottom: 1.0, right: 0.0 });
+        whole.addArrangedSubview(&row);
+        row.widthAnchor().constraintEqualToAnchor(&whole.widthAnchor()).setActive(true);
+        Retained::into_super(whole)
+    }
+
+    /// Image d'un émoji personnalisé (`<:nom:id>` connu), à la taille `size`.
+    fn custom_emoji_image(&self, token: &str, size: f64) -> Option<Retained<NSImage>> {
+        use magicplus_core::emoji::{pieces, Piece};
+        let parsed = pieces(token);
+        let [Piece::Custom { id, .. }] = parsed.as_slice() else { return None };
+        let custom = self.engine().custom_emoji(id)?;
+        let image = NSImage::initWithContentsOfFile(NSImage::alloc(), &ns(&custom.path.to_string_lossy()))?;
+        image.setSize(NSSize::new(size, size));
+        Some(image)
+    }
+
+    /// Message fait seulement d'émojis : chacun en grand (image animée pour les personnalisés).
+    fn big_emojis(&self, text: &str, mtm: MainThreadMarker) -> Retained<NSView> {
+        use magicplus_core::emoji::{pieces, Piece};
+        let row = stack(false, 4.0, mtm);
+        row.setAlignment(NSLayoutAttribute::CenterY);
+        for piece in pieces(text.trim()) {
+            match piece {
+                Piece::Custom { id, name } => match self.engine().custom_emoji(id) {
+                    Some(custom) => match NSImage::initWithContentsOfFile(NSImage::alloc(), &ns(&custom.path.to_string_lossy())) {
+                        Some(image) => {
+                            let view = NSImageView::imageViewWithImage(&image, mtm);
+                            view.setAnimates(true);
+                            view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                            view.setTranslatesAutoresizingMaskIntoConstraints(false);
+                            view.widthAnchor().constraintEqualToConstant(48.0).setActive(true);
+                            view.heightAnchor().constraintEqualToConstant(48.0).setActive(true);
+                            view.setToolTip(Some(&ns(&format!(":{name}:"))));
+                            row.addArrangedSubview(&view);
+                        }
+                        None => row.addArrangedSubview(&label(&format!(":{name}:"), mtm)),
+                    },
+                    None => row.addArrangedSubview(&label(&format!(":{name}:"), mtm)),
+                },
+                Piece::Text(text) => {
+                    for word in text.split_whitespace() {
+                        let emoji = label(word, mtm);
+                        emoji.setFont(Some(&NSFont::systemFontOfSize(34.0)));
+                        row.addArrangedSubview(&emoji);
+                    }
+                }
+            }
+        }
         Retained::into_super(row)
     }
 
@@ -1068,7 +1186,7 @@ impl Controller {
 
     pub(super) fn chat_edit(&self, index: isize) {
         if let Some(message) = self.message_at(index) {
-            self.chat_widgets().input.setString(&ns(&message.text));
+            self.chat_widgets().input.setString(&ns(&magicplus_core::emoji::display_text(&message.text)));
             let mut ui = self.ivars().chat.borrow_mut();
             ui.reply_to = None;
             ui.editing = Some(message.id);
@@ -1225,9 +1343,24 @@ impl Controller {
         self.update_pending();
     }
 
-    pub(super) fn chat_emoji(&self) {
+    /// Bouton « Émojis » de la zone de saisie : notre sélecteur (favoris, récents, personnalisés).
+    pub(super) fn chat_emoji(&self, anchor: &NSView) {
+        self.emoji_popover(anchor, None);
+    }
+
+    /// Visualiseur de caractères de macOS (tout le catalogue Unicode), pour la zone de saisie.
+    pub(super) fn chat_emoji_palette(&self) {
         self.focus_input();
         NSApplication::sharedApplication(self.mtm()).orderFrontCharacterPalette(None);
+    }
+
+    /// Ajoute `text` à la fin du message en cours (un émoji personnalisé s'écrit « :nom: »).
+    pub(super) fn insert_in_composer(&self, text: &str) {
+        let widgets = self.chat_widgets();
+        let current = widgets.input.string().to_string();
+        let spaced = if text.starts_with(':') && !current.is_empty() && !current.ends_with(' ') { format!(" {text} ") } else if text.starts_with(':') { format!("{text} ") } else { text.to_string() };
+        widgets.input.setString(&ns(&format!("{current}{spaced}")));
+        self.focus_input();
     }
 
     /// Cmd+V : dans la zone de saisie, une image ou des fichiers copiés deviennent des pièces jointes.
@@ -1435,7 +1568,7 @@ impl Controller {
     pub(super) fn chat_add_sticker(&self) {
         let picked = rfd::FileDialog::new()
             .set_title("Image ou GIF pour un autocollant")
-            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
             .pick_file();
         if let Some(path) = picked {
             match self.engine().add_sticker(&path) {

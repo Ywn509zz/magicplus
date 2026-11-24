@@ -2,27 +2,62 @@
 
 import { Palette } from "std-widgets.slint";
 
+// Horloge des animations (photos et bannières GIF) : avance de 1 toutes les 50 ms.
+export global Anim {
+    in property <int> tick;
+}
+
+// Palette d'un thème personnalisé (src/themes.rs), donnée par Rust.
+export struct ThemeColors {
+    dark: bool,
+    window: color,
+    nav: color,
+    list: color,
+    chat: color,
+    card: color,
+    border: color,
+    soft: color,
+    text: color,
+    subtle: color,
+    accent: color,
+}
+
+// Thème proposé dans les paramètres (pastille d'aperçu).
+export struct ThemeChoice {
+    id: string,
+    name: string,
+    background: color,
+    panel: color,
+    accent: color,
+    text: color,
+    selected: bool,
+}
+
 export global Theme {
-    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-    out property <color> mica: dark ? #202020 : #f3f3f3;
-    out property <color> nav: dark ? #1b1b1b : #ececec;
-    out property <color> nav-hover: dark ? #ffffff10 : #00000009;
-    out property <color> nav-selected: dark ? #ffffff17 : #00000012;
-    out property <color> card: dark ? #2b2b2b : #fbfbfb;
-    out property <color> card-border: dark ? #3a3a3a : #e3e3e3;
-    out property <color> bubble: dark ? #383838 : #eaeaea;
-    out property <color> text: dark ? #ffffff : #1a1a1a;
-    out property <color> subtle: dark ? #a8a8a8 : #5f5f5f;
-    out property <color> accent: dark ? #60cdff : #0067c0;
+    // Thème personnalisé (sinon : couleurs Windows 11, claires ou sombres).
+    in property <bool> custom;
+    in property <ThemeColors> colors;
+    out property <bool> dark: custom ? colors.dark : Palette.color-scheme == ColorScheme.dark;
+    out property <color> mica: custom ? colors.window : dark ? #202020 : #f3f3f3;
+    out property <color> nav: custom ? colors.nav : dark ? #1b1b1b : #ececec;
+    out property <color> nav-hover: custom ? colors.text.with-alpha(0.06) : dark ? #ffffff10 : #00000009;
+    out property <color> nav-selected: custom ? colors.text.with-alpha(0.10) : dark ? #ffffff17 : #00000012;
+    out property <color> card: custom ? colors.card : dark ? #2b2b2b : #fbfbfb;
+    out property <color> card-border: custom ? colors.border : dark ? #3a3a3a : #e3e3e3;
+    out property <color> bubble: custom ? colors.soft : dark ? #383838 : #eaeaea;
+    out property <color> text: custom ? colors.text : dark ? #ffffff : #1a1a1a;
+    out property <color> subtle: custom ? colors.subtle : dark ? #a8a8a8 : #5f5f5f;
+    out property <color> accent: custom ? colors.accent : dark ? #60cdff : #0067c0;
     out property <color> success: dark ? #6ccb5f : #0f7b0f;
     out property <color> danger: dark ? #ff99a4 : #c42b1c;
     out property <color> warning: dark ? #fce100 : #9d5d00;
     out property <color> neutral: dark ? #b0b0b0 : #6b6b6b;
     // Discussions
-    out property <color> chat-bg: dark ? #272727 : #fcfcfc;
-    out property <color> list-bg: dark ? #202020 : #f3f3f3;
-    out property <color> row-hover: dark ? #ffffff08 : #00000006;
-    out property <color> mine-bubble: dark ? #0f3a57 : #d9ebfa;
+    out property <color> chat-bg: custom ? colors.chat : dark ? #272727 : #fcfcfc;
+    out property <color> list-bg: custom ? colors.list : dark ? #202020 : #f3f3f3;
+    out property <color> row-hover: custom ? colors.text.with-alpha(0.035) : dark ? #ffffff08 : #00000006;
+    out property <color> mine-bubble: custom ? colors.accent.with-alpha(0.22) : dark ? #0f3a57 : #d9ebfa;
+    out property <color> reply-line: custom ? colors.subtle.with-alpha(0.45) : dark ? #4e5058 : #c4c9ce;
     out property <color> badge: dark ? #e0434f : #c42b1c;
-    out property <color> popup: dark ? #2c2c2c : #ffffff;
+    out property <color> popup: custom ? colors.card : dark ? #2c2c2c : #ffffff;
 }

@@ -111,7 +111,7 @@ impl Controller {
                     // SAFETY : erreur fournie par le système, valable pendant l'appel (ou nulle).
                     let reason = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string()).unwrap_or_default();
                     eprintln!("[magicplus] notifications non autorisées : {reason}");
-                    if engine.snapshot().settings.notifications {
+                    if engine.snapshot().settings.notifications.enabled {
                         engine.set_status(
                             "Notifications désactivées pour MagicPlus : autorisez-les dans Réglages Système › Notifications \
                              (MagicPlus doit être rangé dans le dossier Applications)",
@@ -148,7 +148,7 @@ impl Controller {
     pub(super) fn system_tick(&self) {
         let engine = self.engine();
         for notice in engine.take_notices() {
-            if !self.notice_is_visible(&notice) {
+            if notice.even_if_visible || !self.notice_is_visible(&notice) {
                 self.post_notification(&notice);
             }
         }
@@ -202,7 +202,9 @@ impl Controller {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&ns(&notice.title));
         content.setBody(&ns(&notice.body));
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        if !notice.silent {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
         if let Some(conversation) = &notice.conversation {
             content.setThreadIdentifier(&ns(conversation));
         }

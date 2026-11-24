@@ -100,6 +100,7 @@ impl Config {
 
 pub(crate) struct Discovered {
     pub device: DeviceInfo,
+    pub presence: crate::presence::Presence,
     pub fingerprint: String,
     /// Dernière adresse IP connue (non spécifiée si l'appareil n'a été vu qu'en Bluetooth).
     pub ip: IpAddr,
@@ -217,6 +218,8 @@ pub struct PeerView {
     pub fingerprint: String,
     pub trusted: bool,
     pub online: bool,
+    /// Présence annoncée (`Offline` s'il n'est pas joignable ou invisible).
+    pub presence: crate::presence::Presence,
     /// Un appareil associé annonce maintenant une autre clé : possible usurpation.
     pub key_changed: bool,
     /// Cet appareil a essayé de nous envoyer quelque chose mais nous ne l'avons pas associé.
@@ -281,12 +284,30 @@ pub struct Snapshot {
 }
 
 /// Notification du système à afficher (message reçu, demande d'ami…).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Notice {
     /// Conversation à ouvrir au clic (aucune : page Appareils).
     pub conversation: Option<String>,
     pub title: String,
     pub body: String,
+    /// Ce qui l'a déclenchée (pour les préférences).
+    pub kind: NoticeKind,
+    /// Sans son (préférence).
+    pub silent: bool,
+    /// À montrer même si la conversation est déjà affichée au premier plan (préférence).
+    pub even_if_visible: bool,
+}
+
+/// Origine d'une notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoticeKind {
+    /// Message d'une discussion à deux.
+    Direct,
+    /// Message d'un groupe (`mention` : il nous mentionne).
+    Group { mention: bool },
+    /// Autre (demande d'ami, essai…).
+    #[default]
+    Other,
 }
 
 /// Appareil MagicPlus d'une autre version : il s'annonce, mais les deux appareils s'ignorent.
@@ -507,9 +528,9 @@ impl Engine {
             thread::spawn(move || {
                 thread::sleep(Duration::from_secs(3));
                 inner.notify(Notice {
-                    conversation: None,
                     title: "MagicPlus".to_string(),
                     body: "Notification d'essai : les messages reçus s'afficheront ainsi.".to_string(),
+                    ..Notice::default()
                 });
             });
         }
@@ -529,6 +550,22 @@ impl Engine {
 
     pub fn status(&self) -> String {
         lock(&self.inner.status).clone()
+    }
+
+    /// Notification d'essai (bouton « Tester »), montrée si les notifications sont activées.
+    pub fn test_notice(&self) {
+        let prefs = self.snapshot().settings.notifications;
+        if !prefs.enabled {
+            self.inner.set_status("Les notifications sont désactivées");
+            return;
+        }
+        self.inner.push_notice(Notice {
+            title: "MagicPlus".to_string(),
+            body: "Les notifications fonctionnent 🎉".to_string(),
+            silent: !prefs.sound,
+            even_if_visible: true,
+            ..Notice::default()
+        });
     }
 
     /// Notifications à afficher depuis le dernier appel (messages, demandes d'ami).
@@ -597,6 +634,7 @@ impl Engine {
                     fingerprint: peer.fingerprint.clone(),
                     trusted: same_key,
                     online: peer.online(),
+                    presence: if peer.online() { peer.presence } else { crate::presence::Presence::Offline },
                     key_changed: trusted_entry.is_some() && !same_key,
                     wants_pairing: !same_key && wants_pairing(id),
                 });
@@ -615,6 +653,7 @@ impl Engine {
                         fingerprint: crypto::fingerprint(&entry.public_key),
                         trusted: true,
                         online: false,
+                        presence: crate::presence::Presence::Offline,
                         key_changed: false,
                         wants_pairing: false,
                     });
@@ -1034,11 +1073,25 @@ impl Inner {
         self.touch();
     }
 
-    /// Notification pour l'interface (si l'utilisateur les veut).
-    pub(crate) fn notify(&self, notice: Notice) {
-        if !lock(&self.settings).notifications {
+    /// Notification pour l'interface, selon les préférences et la présence (rien en « ne pas
+    /// déranger »).
+    pub(crate) fn notify(&self, mut notice: Notice) {
+        let (prefs, presence) = {
+            let settings = lock(&self.settings);
+            (settings.notifications.clone(), crate::presence::effective(&settings, crate::presence::system_idle()))
+        };
+        if !crate::presence::should_notify(notice.kind, &prefs, presence) {
             return;
         }
+        if !prefs.preview && notice.kind != NoticeKind::Other {
+            notice.body = "Nouveau message".to_string();
+        }
+        notice.silent = !prefs.sound;
+        notice.even_if_visible = prefs.when_focused;
+        self.push_notice(notice);
+    }
+
+    fn push_notice(&self, notice: Notice) {
         let mut notices = lock(&self.notices);
         if notices.len() < 20 {
             notices.push(notice);
@@ -1073,6 +1126,7 @@ impl Inner {
             discovery_port: self.cfg.discovery_port,
             reply,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
+            presence: crate::presence::effective(&lock(&self.settings), crate::presence::system_idle()).announced(),
         }
     }
 
@@ -1136,6 +1190,7 @@ impl Inner {
         }
 
         let fingerprint = crypto::fingerprint(&hello.device.public_key);
+        let presence = hello.presence;
         let mut device = hello.device;
         device.name = device.name.chars().filter(|c| !c.is_control()).take(60).collect();
         let name = device.name.clone();
@@ -1166,9 +1221,13 @@ impl Inner {
 
         let mut peers = lock(&self.peers);
         let announce = peers.get(&id).is_none_or(|known| !known.online());
+        if peers.get(&id).is_some_and(|known| known.presence != presence) {
+            self.touch();
+        }
         let now = Instant::now();
         let entry = peers.entry(id).or_insert_with(|| Discovered {
             device: device.clone(),
+            presence,
             fingerprint: fingerprint.clone(),
             ip: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             tcp_port: 0,
@@ -1183,6 +1242,7 @@ impl Inner {
             entry.bluetooth = None;
         }
         entry.device = device;
+        entry.presence = presence;
         entry.fingerprint = fingerprint;
         entry.last_seen = now;
         entry.was_online = true;
@@ -1344,6 +1404,7 @@ impl Inner {
                 self.set_status(format!("{name} veut vous envoyer quelque chose : associez-le dans la page Appareils"));
             }
             write_ack(&mut channel, &Ack::refused("cet appareil ne vous a pas encore associé", "not-paired"));
+            channel.get_ref().close_after_reply();
             return;
         };
 
@@ -1381,7 +1442,7 @@ impl Inner {
             self.suspend_incoming(&id, "interrompu — reprise automatique quand l'expéditeur revient");
         }
         write_ack(&mut channel, &failure.unwrap_or_else(Ack::ok));
-        channel.get_ref().close();
+        channel.get_ref().close_after_reply();
     }
 
     fn handle_message(&self, sender: &SenderInfo, plain: &[u8], started: &mut Vec<String>) -> Result<Reply> {
@@ -1473,6 +1534,7 @@ impl Inner {
                 self.receive_profile(sender, profile, body)?;
                 Ok(Reply::None)
             }
+            Message::EmojiFetch { id } => Ok(Reply::Data(self.serve_emoji(sender, &id)?)),
             Message::CanvasSync { conversation, canvas, update, state } => {
                 let reply = self.receive_canvas_sync(sender, &conversation, canvas, &update, &state)?;
                 Ok(Reply::Data(reply))

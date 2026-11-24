@@ -221,6 +221,7 @@ impl Inner {
             conversation: None,
             title: "Demande d'ami".to_string(),
             body: format!("{name} (groupe « {group} ») veut devenir votre ami"),
+            ..crate::engine::Notice::default()
         });
         self.touch();
         Ok("pending".to_string())

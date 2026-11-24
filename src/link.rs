@@ -17,6 +17,10 @@ pub(crate) trait Link: Read + Write + Send {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     /// Ferme tout.
     fn close(&self);
+    /// Ferme après avoir envoyé la dernière réponse, sans la perdre (voir TCP).
+    fn close_after_reply(&self) {
+        self.close();
+    }
 }
 
 impl Link for TcpStream {
@@ -33,6 +37,25 @@ impl Link for TcpStream {
     }
 
     fn close(&self) {
+        let _ = self.shutdown(Shutdown::Both);
+    }
+
+    /// Fermer un socket qui contient encore des données non lues envoie un RST, et Windows jette
+    /// alors chez l'expéditeur ce qu'il n'avait pas encore lu (notre refus, par exemple). On cesse
+    /// donc d'écrire et on lit ce qui arrive encore jusqu'à ce que l'autre ferme (2 s et 1 Mo au
+    /// plus).
+    fn close_after_reply(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+        TcpStream::set_read_timeout(self, Some(Duration::from_secs(2))).ok();
+        let mut reader = self;
+        let mut buffer = [0_u8; 8192];
+        let mut drained = 0;
+        while drained < 1024 * 1024 {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(size) => drained += size,
+            }
+        }
         let _ = self.shutdown(Shutdown::Both);
     }
 }
@@ -55,5 +78,9 @@ impl<L: Link + ?Sized> Link for Box<L> {
 
     fn close(&self) {
         (**self).close()
+    }
+
+    fn close_after_reply(&self) {
+        (**self).close_after_reply()
     }
 }

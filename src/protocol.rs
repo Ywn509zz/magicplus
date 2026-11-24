@@ -49,6 +49,9 @@ pub struct Hello {
     /// Absente avant la 0.4.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_version: String,
+    /// Présence annoncée (en ligne, inactif, ne pas déranger, hors ligne pour un invisible).
+    #[serde(default)]
+    pub presence: crate::presence::Presence,
 }
 
 /// En-tête chiffré d'une trame.
@@ -108,6 +111,10 @@ pub enum Message {
     Profile {
         profile: ProfileInfo,
     },
+    /// Demande l'image d'un de nos émojis personnalisés (réponse : ses octets en base64).
+    EmojiFetch {
+        id: String,
+    },
     /// Canevas d'une conversation : ce qui manque au destinataire (mise à jour Yjs v1, base64) et
     /// l'état de l'expéditeur. Réponse : `Ack.data` = ce qui manque à l'expéditeur et l'état du
     /// destinataire (JSON). `canvas` : le canevas en cours de modification (« X modifie… »).
@@ -159,6 +166,9 @@ pub struct ProfileInfo {
     pub color: Option<u32>,
     pub avatar: Option<ImageInfo>,
     pub banner: Option<ImageInfo>,
+    /// Émojis personnalisés : leurs images sont demandées ensuite (`EmojiFetch`), une à une,
+    /// seulement celles qui manquent (un profil doit tenir dans une trame).
+    pub emojis: Vec<crate::emoji::EmojiInfo>,
 }
 
 /// Membre d'une conversation : sa clé est présentée par le créateur du groupe.

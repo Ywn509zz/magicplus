@@ -178,54 +178,158 @@ impl Controller {
         }
     }
 
-    /// Grille d'émojis pour réagir, et champ pour en taper (ou coller) n'importe quel autre.
+    /// Grille d'émojis pour réagir au message `index`.
     pub(super) fn reaction_picker(&self, index: isize) {
-        let mtm = self.mtm();
         let Some(anchor) = self.ivars().chat.borrow().row_view(index) else { return };
+        self.emoji_popover(&anchor, Some(index));
+    }
+
+    /// Sélecteur d'émojis, pour écrire (`reaction` : `None`) ou réagir : favoris, récents, émojis
+    /// personnalisés (les nôtres et ceux des contacts), émojis courants ; tout le catalogue
+    /// Unicode passe par le visualiseur de caractères de macOS. ⌥-clic : favori.
+    pub(super) fn emoji_popover(&self, anchor: &NSView, reaction: Option<isize>) {
+        use magicplus_core::emoji::{display_text, pieces, Piece};
+        let mtm = self.mtm();
+        let engine = self.engine().clone();
+        let prefs = engine.emoji_prefs();
+        let customs = engine.custom_emojis();
         let mut actions: Vec<Action> = Vec::new();
         let column = stack(true, 6.0, mtm);
         column.setEdgeInsets(NSEdgeInsets { top: 10.0, left: 8.0, bottom: 10.0, right: 8.0 });
-        let title = secondary("Réagir avec…", mtm);
-        title.setFont(Some(&semibold(11.0)));
-        column.addArrangedSubview(&title);
-        for chunk in REACTION_EMOJIS.chunks(8) {
-            let row = stack(false, 2.0, mtm);
-            for emoji in chunk {
-                let tag = actions.len() as isize;
-                let emoji_text = (*emoji).to_string();
-                actions.push(Box::new(move |c: &Controller| c.chat_react_with(index, &emoji_text)));
-                let item = button(emoji, sel!(popoverAction:), self, mtm);
-                item.setTag(tag);
-                item.setBezelStyle(NSBezelStyle::AccessoryBar);
-                item.setShowsBorderOnlyWhileMouseInside(true);
-                item.setFont(Some(&NSFont::systemFontOfSize(19.0)));
-                item.setTranslatesAutoresizingMaskIntoConstraints(false);
-                item.widthAnchor().constraintEqualToConstant(26.0).setActive(true);
-                item.heightAnchor().constraintEqualToConstant(30.0).setActive(true);
-                row.addArrangedSubview(&item);
+
+        // Image d'un jeton `<:nom:id>` connu, sinon `None` (émoji Unicode).
+        let custom_path = |token: &str| match pieces(token).as_slice() {
+            [Piece::Custom { id, .. }] => customs.iter().find(|c| c.id == *id).map(|c| c.path.clone()),
+            _ => None,
+        };
+        let section = |title: &str, tokens: Vec<String>, actions: &mut Vec<Action>| {
+            let tokens: Vec<String> = tokens.into_iter().filter(|t| !t.contains("<:") || custom_path(t).is_some()).collect();
+            if tokens.is_empty() {
+                return;
             }
-            column.addArrangedSubview(&row);
-        }
-        let other = stack(false, 6.0, mtm);
-        let field = NSTextField::textFieldWithString(&ns(""), mtm);
-        field.setPlaceholderString(Some(&ns("Autre émoji (Ctrl+Cmd+Espace)")));
-        field.setTranslatesAutoresizingMaskIntoConstraints(false);
-        field.widthAnchor().constraintEqualToConstant(160.0).setActive(true);
-        other.addArrangedSubview(&field);
+            let heading = secondary(title, mtm);
+            heading.setFont(Some(&semibold(11.0)));
+            column.addArrangedSubview(&heading);
+            for chunk in tokens.chunks(8) {
+                let row = stack(false, 2.0, mtm);
+                for token in chunk {
+                    let tag = actions.len() as isize;
+                    let picked = token.clone();
+                    actions.push(Box::new(move |c: &Controller| c.emoji_chosen(&picked, reaction)));
+                    let item = match custom_path(token).and_then(|path| NSImage::initWithContentsOfFile(NSImage::alloc(), &ns(&path.to_string_lossy()))) {
+                        Some(image) => {
+                            image.setSize(NSSize::new(22.0, 22.0));
+                            let item = unsafe { NSButton::buttonWithTitle_image_target_action(&ns(""), &image, Some(as_target(self)), Some(sel!(popoverAction:)), mtm) };
+                            item.setImagePosition(NSCellImagePosition::ImageOnly);
+                            item.setToolTip(Some(&ns(&display_text(token))));
+                            item
+                        }
+                        None => {
+                            let item = button(token, sel!(popoverAction:), self, mtm);
+                            item.setFont(Some(&NSFont::systemFontOfSize(19.0)));
+                            item
+                        }
+                    };
+                    item.setTag(tag);
+                    item.setBezelStyle(NSBezelStyle::AccessoryBar);
+                    item.setShowsBorderOnlyWhileMouseInside(true);
+                    item.setTranslatesAutoresizingMaskIntoConstraints(false);
+                    item.widthAnchor().constraintEqualToConstant(26.0).setActive(true);
+                    item.heightAnchor().constraintEqualToConstant(30.0).setActive(true);
+                    row.addArrangedSubview(&item);
+                }
+                column.addArrangedSubview(&row);
+            }
+        };
+        section("FAVORIS", prefs.favorites.clone(), &mut actions);
+        section("UTILISÉS RÉCEMMENT", prefs.recent.iter().take(16).cloned().collect(), &mut actions);
+        section("MES ÉMOJIS", customs.iter().filter(|c| c.mine).map(|c| c.token()).collect(), &mut actions);
+        section("DE VOS CONTACTS", customs.iter().filter(|c| !c.mine).map(|c| c.token()).collect(), &mut actions);
+        section("COURANTS", REACTION_EMOJIS.iter().map(|e| e.to_string()).collect(), &mut actions);
+
+        let hint = secondary("⌥-clic : ajouter aux favoris ou en retirer", mtm);
+        hint.setFont(Some(&NSFont::systemFontOfSize(10.5)));
+        column.addArrangedSubview(&hint);
+
+        let buttons = stack(false, 6.0, mtm);
         let tag = actions.len() as isize;
-        let typed = field.clone();
-        actions.push(Box::new(move |c: &Controller| {
-            let emoji = typed.stringValue().to_string();
-            let emoji = emoji.trim();
-            if !emoji.is_empty() {
-                c.chat_react_with(index, emoji);
-            }
-        }));
-        let react = button("Réagir", sel!(popoverAction:), self, mtm);
-        react.setTag(tag);
-        other.addArrangedSubview(&react);
-        column.addArrangedSubview(&other);
-        self.present_popover(&column, &anchor, actions);
+        actions.push(Box::new(move |c: &Controller| c.all_emojis(reaction)));
+        let all = button("Tous les émojis…", sel!(popoverAction:), self, mtm);
+        all.setTag(tag);
+        buttons.addArrangedSubview(&all);
+        let tag = actions.len() as isize;
+        actions.push(Box::new(|c: &Controller| c.add_custom_emoji()));
+        let add = button("Ajouter…", sel!(popoverAction:), self, mtm);
+        add.setToolTip(Some(&ns("Nouvel émoji personnalisé (image ou GIF animé), envoyé à vos contacts avec votre profil")));
+        add.setTag(tag);
+        buttons.addArrangedSubview(&add);
+        column.addArrangedSubview(&buttons);
+
+        if reaction.is_some() {
+            // N'importe quel autre émoji, tapé ou collé.
+            let other = stack(false, 6.0, mtm);
+            let field = NSTextField::textFieldWithString(&ns(""), mtm);
+            field.setPlaceholderString(Some(&ns("Autre émoji (Ctrl+Cmd+Espace)")));
+            field.setTranslatesAutoresizingMaskIntoConstraints(false);
+            field.widthAnchor().constraintEqualToConstant(160.0).setActive(true);
+            other.addArrangedSubview(&field);
+            let tag = actions.len() as isize;
+            let typed = field.clone();
+            actions.push(Box::new(move |c: &Controller| {
+                let emoji = typed.stringValue().to_string();
+                let emoji = emoji.trim();
+                if !emoji.is_empty() {
+                    c.emoji_chosen(emoji, reaction);
+                }
+            }));
+            let react = button("Réagir", sel!(popoverAction:), self, mtm);
+            react.setTag(tag);
+            other.addArrangedSubview(&react);
+            column.addArrangedSubview(&other);
+        }
+        self.present_popover(&column, anchor, actions);
+    }
+
+    /// Émoji choisi dans le sélecteur : ⌥-clic → favori ; sinon réaction ou ajout au message.
+    fn emoji_chosen(&self, token: &str, reaction: Option<isize>) {
+        let option = NSApplication::sharedApplication(self.mtm())
+            .currentEvent()
+            .is_some_and(|event| event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Option));
+        if option {
+            let favorite = self.engine().toggle_favorite_emoji(token);
+            let shown = magicplus_core::emoji::display_text(token);
+            self.engine().set_status(if favorite { format!("{shown} ajouté aux favoris") } else { format!("{shown} retiré des favoris") });
+            return;
+        }
+        self.engine().note_emoji_used(token);
+        match reaction {
+            Some(index) => self.chat_react_with(index, token),
+            None => self.insert_in_composer(&magicplus_core::emoji::display_text(token)),
+        }
+    }
+
+    /// Tout le catalogue Unicode : le visualiseur de caractères de macOS.
+    fn all_emojis(&self, reaction: Option<isize>) {
+        if reaction.is_none() {
+            self.chat_emoji_palette();
+        } else {
+            NSApplication::sharedApplication(self.mtm()).orderFrontCharacterPalette(None);
+        }
+    }
+
+    /// Nouvel émoji personnalisé : image choisie, préparée hors du fil principal.
+    fn add_custom_emoji(&self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Nouvel émoji personnalisé (le nom vient du fichier)")
+            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
+            .pick_file();
+        let Some(path) = picked else { return };
+        let engine = self.engine().clone();
+        engine.set_status("Préparation de l'émoji…");
+        std::thread::spawn(move || match engine.add_custom_emoji(&path, None) {
+            Ok(added) => engine.set_status(format!("Émoji :{}: ajouté : vos contacts le recevront avec votre profil", added.name)),
+            Err(error) => engine.set_status(format!("Émoji refusé : {error}")),
+        });
     }
 
     /// Choix de la conversation où transférer un message.

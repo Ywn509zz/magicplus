@@ -2,16 +2,17 @@
 // navigation à gauche, fond « Mica », cartes arrondies, thème clair ou sombre.
 
 import { Button, Switch, LineEdit, ComboBox, CheckBox, ProgressIndicator, ScrollView, TextEdit, Palette } from "std-widgets.slint";
-import { Theme } from "theme.slint";
-import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem } from "chat.slint";
+import { Theme, Anim, ThemeColors, ThemeChoice } from "theme.slint";
+import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem, EmojiCell, EmojiRow, InlinePiece, GifItem } from "chat.slint";
 
 import { MarkdownStyle, BlockItem, TableRowItem, TableCellItem } from "markdown.slint";
-import { ProfileCard, ProfileItem } from "profile.slint";
+import { ProfileCard, ProfileItem, Avatar, PresenceDot } from "profile.slint";
 import { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult } from "canvas.slint";
 
-export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem }
+export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem, EmojiCell, EmojiRow, InlinePiece, GifItem }
 export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem }
 export { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult }
+export { Anim, Theme, ThemeColors, ThemeChoice }
 
 export struct PeerItem {
     id: string,
@@ -339,6 +340,142 @@ component TransferCard inherits Card {
     }
 }
 
+// Ligne du menu des statuts : pastille, nom, explication. La zone cliquable est posée
+// par-dessus le contenu (comme les menus des discussions).
+component PresenceRow inherits Rectangle {
+    in property <int> presence;
+    in property <string> title;
+    in property <string> detail;
+    callback clicked;
+    min-height: row.min-height;
+    preferred-height: Math.max(36px, row.preferred-height);
+    border-radius: 6px;
+    background: touch.has-hover ? Theme.nav-hover : transparent;
+
+    row := HorizontalLayout {
+        padding: 8px;
+        padding-left: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            PresenceDot {
+                size: 14px;
+                presence: root.presence;
+                ring: Theme.popup;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            if root.detail != "": Text {
+                text: root.detail;
+                color: Theme.subtle;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Pastille d'aperçu d'un thème : son fond, un panneau, un trait d'accent et son nom.
+component ThemeSwatch inherits Rectangle {
+    in property <ThemeChoice> choice;
+    callback picked();
+    width: 104px;
+    height: 84px;
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.picked();
+        }
+    }
+
+    VerticalLayout {
+        spacing: 6px;
+        Rectangle {
+            height: 58px;
+            border-radius: 8px;
+            background: root.choice.background;
+            border-width: root.choice.selected ? 2px : 1px;
+            border-color: root.choice.selected ? Theme.accent : touch.has-hover ? Theme.subtle : Theme.card-border;
+            clip: true;
+            Rectangle {
+                x: 0px;
+                width: 26px;
+                height: parent.height;
+                background: root.choice.panel;
+            }
+            Rectangle {
+                x: 34px;
+                y: 14px;
+                width: 52px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.choice.text.with-alpha(0.7);
+            }
+            Rectangle {
+                x: 34px;
+                y: 26px;
+                width: 36px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.choice.text.with-alpha(0.35);
+            }
+            Rectangle {
+                x: 34px;
+                y: 40px;
+                width: 22px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.choice.accent;
+            }
+        }
+        Text {
+            text: root.choice.name;
+            color: root.choice.selected ? Theme.accent : Theme.text;
+            font-size: 12px;
+            font-weight: root.choice.selected ? 600 : 400;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// Grille de pastilles qui passe à la ligne selon la largeur disponible.
+component ThemePicker inherits Rectangle {
+    in property <[ThemeChoice]> themes;
+    callback picked(string);
+    property <length> cell-w: 104px + 12px;
+    property <length> cell-h: 84px + 12px;
+    property <int> columns: Math.max(1, Math.floor((self.width + 12px) / root.cell-w));
+    preferred-height: Math.ceil(root.themes.length / root.columns) * root.cell-h;
+    min-height: self.preferred-height;
+
+    for choice[i] in root.themes: ThemeSwatch {
+        x: Math.mod(i, root.columns) * root.cell-w;
+        y: Math.floor(i / root.columns) * root.cell-h;
+        choice: choice;
+        picked => {
+            root.picked(choice.id);
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "MagicPlus";
     icon: @image-url("icons/shield.svg");
@@ -382,6 +519,27 @@ export component AppWindow inherits Window {
     in-out property <bool> notifications-on: true;
     // Mon profil (Paramètres).
     in property <ProfileItem> my-profile;
+    // Ma présence (0 hors ligne/invisible, 1 en ligne, 2 inactif, 3 ne pas déranger) et son nom.
+    in property <int> my-presence: 1;
+    in property <string> my-presence-label: "En ligne";
+    // 0 en ligne, 1 inactif, 2 ne pas déranger, 3 invisible.
+    callback presence-picked(int);
+    // Ouvre le menu des statuts (captures d'écran de développement).
+    in property <int> presence-request;
+    changed presence-request => {
+        presence-popup.show();
+    }
+    // Notifications et inactivité automatique (Paramètres).
+    in-out property <bool> notif-direct: true;
+    // 0 tous les messages, 1 mentions seulement, 2 jamais.
+    in-out property <int> notif-groups;
+    in-out property <bool> notif-preview: true;
+    in-out property <bool> notif-sound: true;
+    in-out property <bool> notif-when-focused;
+    // 0 jamais, 1 : 5 min, 2 : 10 min, 3 : 15 min, 4 : 30 min.
+    in-out property <int> auto-idle-index: 2;
+    callback notif-changed();
+    callback notif-test();
     in-out property <string> profile-bio;
     in-out property <string> profile-pronouns;
     // -1 : couleur automatique, sinon index dans `banner-colors`.
@@ -425,7 +583,9 @@ export component AppWindow inherits Window {
     callback cancel-transfer(string);
     callback open-path(string);
     callback remove-received(string);
-    callback theme-changed(bool);
+    // Thèmes de couleur proposés (src/themes.rs) et choix de l'un d'eux.
+    in property <[ThemeChoice]> themes;
+    callback theme-picked(string);
     callback add-address(string);
     callback remove-address(string);
     callback chat-with(string);
@@ -448,6 +608,11 @@ export component AppWindow inherits Window {
 
     public function apply-theme(dark: bool) {
         Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    // Revient au thème clair ou sombre de Windows.
+    public function follow-system-theme() {
+        Palette.color-scheme = ColorScheme.unknown;
     }
 
     VerticalLayout {
@@ -537,6 +702,109 @@ export component AppWindow inherits Window {
                         selected: root.page == 3;
                         clicked => {
                             root.page = 3;
+                        }
+                    }
+
+                    // Moi : photo avec pastille de présence, nom, statut (clic : changer).
+                    me-panel := Rectangle {
+                        height: 52px;
+                        border-radius: 8px;
+                        background: me-touch.has-hover || presence-popup.is-open ? Theme.nav-hover : transparent;
+                        me-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                presence-popup.show();
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                Avatar {
+                                    size: 34px;
+                                    initials: root.my-profile.initials;
+                                    tint: root.my-profile.color;
+                                    photo: root.my-profile.photo;
+                                    has-photo: root.my-profile.has-photo;
+                                    show-presence: true;
+                                    presence: root.my-presence;
+                                    ring: Theme.nav;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 1px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.my-profile.name;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: root.my-presence-label;
+                                    color: Theme.subtle;
+                                    font-size: 11.5px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            presence-popup := PopupWindow {
+                x: 12px;
+                y: root.height - self.height - 92px;
+                width: 260px;
+                height: presence-col.preferred-height + 2px;
+                close-policy: close-on-click-outside;
+                Rectangle {
+                    background: Theme.popup;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: #00000040;
+                    presence-col := VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+                        PresenceRow {
+                            presence: 1;
+                            title: "En ligne";
+                            clicked => {
+                                root.presence-picked(0);
+                                presence-popup.close();
+                            }
+                        }
+                        PresenceRow {
+                            presence: 2;
+                            title: "Inactif";
+                            clicked => {
+                                root.presence-picked(1);
+                                presence-popup.close();
+                            }
+                        }
+                        PresenceRow {
+                            presence: 3;
+                            title: "Ne pas déranger";
+                            detail: "Aucune notification";
+                            clicked => {
+                                root.presence-picked(2);
+                                presence-popup.close();
+                            }
+                        }
+                        PresenceRow {
+                            presence: 0;
+                            title: "Invisible";
+                            detail: "Vous apparaîtrez hors ligne ; les messages passent";
+                            clicked => {
+                                root.presence-picked(3);
+                                presence-popup.close();
+                            }
                         }
                     }
                 }
@@ -1117,7 +1385,7 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         Subtle {
-                                            text: "PNG, JPEG, WebP ou GIF animé. La photo est recadrée en carré, la bannière en 5:2.";
+                                            text: "PNG, JPEG ou GIF animé. La photo est recadrée en carré, la bannière en 5:2.";
                                         }
                                         Text {
                                             text: "Couleur de la bannière (sans image)";
@@ -1203,12 +1471,106 @@ export component AppWindow inherits Window {
                                 SectionTitle {
                                     text: "Apparence";
                                 }
-                                Switch {
-                                    text: "Thème sombre";
-                                    checked: Theme.dark;
-                                    toggled => {
-                                        Palette.color-scheme = self.checked ? ColorScheme.dark : ColorScheme.light;
-                                        root.theme-changed(self.checked);
+                                ThemePicker {
+                                    themes: root.themes;
+                                    picked(id) => {
+                                        root.theme-picked(id);
+                                    }
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Statut et notifications";
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    Text {
+                                        text: "Passer en « Inactif » sans clavier ni souris pendant :";
+                                        color: Theme.text;
+                                        vertical-alignment: center;
+                                    }
+                                    ComboBox {
+                                        width: 140px;
+                                        model: ["Jamais", "5 minutes", "10 minutes", "15 minutes", "30 minutes"];
+                                        current-index <=> root.auto-idle-index;
+                                        selected => {
+                                            root.notif-changed();
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    padding-left: 12px;
+                                    CheckBox {
+                                        text: "Discussions à deux";
+                                        enabled: root.notifications-on;
+                                        checked <=> root.notif-direct;
+                                        toggled => {
+                                            root.notif-changed();
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        alignment: start;
+                                        Text {
+                                            text: "Groupes :";
+                                            color: root.notifications-on ? Theme.text : Theme.subtle;
+                                            vertical-alignment: center;
+                                        }
+                                        ComboBox {
+                                            width: 220px;
+                                            enabled: root.notifications-on;
+                                            model: ["Tous les messages", "Seulement si on me mentionne (@)", "Jamais"];
+                                            current-index <=> root.notif-groups;
+                                            selected => {
+                                                root.notif-changed();
+                                            }
+                                        }
+                                    }
+                                    CheckBox {
+                                        text: "Afficher le texte du message";
+                                        enabled: root.notifications-on;
+                                        checked <=> root.notif-preview;
+                                        toggled => {
+                                            root.notif-changed();
+                                        }
+                                    }
+                                    CheckBox {
+                                        text: "Jouer un son";
+                                        enabled: root.notifications-on;
+                                        checked <=> root.notif-sound;
+                                        toggled => {
+                                            root.notif-changed();
+                                        }
+                                    }
+                                    CheckBox {
+                                        text: "Même quand la discussion est ouverte à l'écran";
+                                        enabled: root.notifications-on;
+                                        checked <=> root.notif-when-focused;
+                                        toggled => {
+                                            root.notif-changed();
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    spacing: 10px;
+                                    Button {
+                                        text: "Tester une notification";
+                                        enabled: root.notifications-on;
+                                        clicked => {
+                                            root.notif-test();
+                                        }
+                                    }
+                                    Text {
+                                        text: "« Ne pas déranger » coupe toutes les notifications. Réglages fins (bannières, son, écran verrouillé) : Paramètres Windows → Système → Notifications → MagicPlus.";
+                                        color: Theme.subtle;
+                                        font-size: 11.5px;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
                                     }
                                 }
                             }
