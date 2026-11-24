@@ -75,7 +75,7 @@ fn spawn_udp_listener(inner: Arc<Inner>) {
             let is_reply = hello.reply;
             let peer_id = hello.device.id.clone();
             let name = hello.device.name.clone();
-            let Some(announce) = inner.on_hello(hello, source.ip()) else {
+            let Some(announce) = inner.on_hello(hello, crate::engine::Source::Udp(source.ip())) else {
                 continue;
             };
             if announce {
@@ -218,7 +218,7 @@ fn spawn_tcp_listener(inner: Arc<Inner>) {
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).ok();
                     let inner = inner.clone();
-                    thread::spawn(move || inner.handle_connection(stream));
+                    thread::spawn(move || inner.handle_connection(Box::new(stream)));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(50)),
                 Err(error) => {

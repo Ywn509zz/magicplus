@@ -3,7 +3,9 @@
 //! Aucune dépendance à l'interface : l'interface lit `snapshot()` et appelle les méthodes.
 
 use crate::{
-    crypto, net,
+    crypto,
+    link::{BoxLink, Link},
+    net,
     protocol::*,
     secure::{self, SecureStream},
     store::{default_data_dir, Settings, Store, StoredIdentity, TrustedPeer},
@@ -51,6 +53,8 @@ pub struct Config {
     pub fail_after_chunks: Option<u64>,
     /// Dépôt GitHub (« compte/dépôt ») où chercher les mises à jour ; `None` : jamais.
     pub update_repository: Option<String>,
+    /// Liaison Bluetooth avec les ordinateurs appairés (jamais dans les tests).
+    pub bluetooth: bool,
 }
 
 impl Config {
@@ -63,6 +67,7 @@ impl Config {
             retry_delay: Duration::from_secs(5),
             fail_after_chunks: None,
             update_repository: None,
+            bluetooth: false,
         }
     }
 
@@ -87,6 +92,8 @@ impl Config {
             config.discovery_port = discovery;
             config.transfer_port = transfer;
         }
+        // `MAGICPLUS_NO_BLUETOOTH=1` : pas de Bluetooth (copie de développement).
+        config.bluetooth = std::env::var_os("MAGICPLUS_NO_BLUETOOTH").is_none();
         config
     }
 }
@@ -95,10 +102,73 @@ pub(crate) struct Discovered {
     pub device: DeviceInfo,
     pub presence: crate::presence::Presence,
     pub fingerprint: String,
+    /// Dernière adresse IP connue (non spécifiée si l'appareil n'a été vu qu'en Bluetooth).
     pub ip: IpAddr,
     pub tcp_port: u16,
+    /// Dernière annonce, quel que soit le moyen.
     pub last_seen: Instant,
+    /// Dernière annonce par le réseau local (UDP).
+    pub udp_seen: Option<Instant>,
+    /// Adresse Bluetooth et dernière annonce reçue par ce moyen.
+    pub bluetooth: Option<(String, Instant)>,
     pub was_online: bool,
+}
+
+/// D'où vient une annonce.
+#[derive(Debug, Clone)]
+pub(crate) enum Source {
+    Udp(IpAddr),
+    Bluetooth(String),
+}
+
+impl Source {
+    fn label(&self) -> String {
+        match self {
+            Source::Udp(ip) => ip.to_string(),
+            Source::Bluetooth(_) => "Bluetooth".to_string(),
+        }
+    }
+}
+
+/// Comment joindre un appareil.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Route {
+    Tcp(SocketAddr),
+    Bluetooth(String),
+}
+
+impl Discovered {
+    pub(crate) fn udp_online(&self) -> bool {
+        self.udp_seen.is_some_and(|at| at.elapsed() < ONLINE_WINDOW)
+    }
+
+    pub(crate) fn bluetooth_online(&self) -> bool {
+        self.bluetooth.as_ref().is_some_and(|(_, at)| at.elapsed() < crate::bluetooth::ONLINE_WINDOW)
+    }
+
+    pub(crate) fn online(&self) -> bool {
+        self.udp_online() || self.bluetooth_online()
+    }
+
+    /// Réseau local d'abord (plus rapide), sinon Bluetooth.
+    pub(crate) fn route(&self) -> Option<Route> {
+        if self.udp_online() {
+            Some(Route::Tcp(SocketAddr::new(self.ip, self.tcp_port)))
+        } else if self.bluetooth_online() {
+            self.bluetooth.as_ref().map(|(address, _)| Route::Bluetooth(address.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn address_label(&self) -> String {
+        let ip = (!self.ip.is_unspecified()).then(|| format!("{}:{}", self.ip, self.tcp_port));
+        match (ip, self.bluetooth_online() && !self.udp_online()) {
+            (Some(ip), false) => ip,
+            (Some(ip), true) => format!("{ip}  ·  via Bluetooth"),
+            (None, _) => "via Bluetooth".to_string(),
+        }
+    }
 }
 
 /// Appareil associé et joignable en ce moment.
@@ -106,7 +176,7 @@ pub(crate) struct Discovered {
 pub(crate) struct Target {
     pub id: String,
     pub name: String,
-    pub address: SocketAddr,
+    pub route: Route,
     pub public_key: PublicKey,
 }
 
@@ -209,6 +279,8 @@ pub struct Snapshot {
     pub firewall: crate::firewall::FirewallState,
     /// Demandes d'ami reçues et envoyées.
     pub friend_requests: Vec<crate::friends::FriendRequestView>,
+    /// Liaison Bluetooth (vide : désactivée ou non prise en charge).
+    pub bluetooth: String,
 }
 
 /// Notification du système à afficher (message reçu, demande d'ami…).
@@ -341,6 +413,8 @@ pub(crate) struct Inner {
     pub friends: Mutex<crate::friends::FriendStore>,
     /// Notifications pas encore affichées par l'interface.
     pub notices: Mutex<Vec<Notice>>,
+    /// État de la liaison Bluetooth, pour la page Appareils (vide : pas de Bluetooth).
+    pub bluetooth_status: Mutex<String>,
     /// Tests : la coupure simulée n'a lieu qu'une fois.
     pub test_cut_done: AtomicBool,
     /// Discussions (conversations, journal d'événements, synchronisation).
@@ -431,6 +505,7 @@ impl Engine {
                 }),
                 friends: Mutex::new(friends),
                 notices: Mutex::default(),
+                bluetooth_status: Mutex::default(),
                 test_cut_done: AtomicBool::new(false),
                 chat: Mutex::new(chat),
                 dirty: AtomicBool::new(true),
@@ -460,6 +535,7 @@ impl Engine {
             });
         }
         crate::friends::spawn_friend_scheduler(engine.inner.clone());
+        crate::bluetooth::spawn(engine.inner.clone());
         Ok(engine)
     }
 
@@ -554,11 +630,11 @@ impl Engine {
                     alias,
                     pseudo,
                     platform: peer.device.platform.clone(),
-                    address: format!("{}:{}", peer.ip, peer.tcp_port),
+                    address: peer.address_label(),
                     fingerprint: peer.fingerprint.clone(),
                     trusted: same_key,
-                    online: peer.last_seen.elapsed() < ONLINE_WINDOW,
-                    presence: if peer.last_seen.elapsed() < ONLINE_WINDOW { peer.presence } else { crate::presence::Presence::Offline },
+                    online: peer.online(),
+                    presence: if peer.online() { peer.presence } else { crate::presence::Presence::Offline },
                     key_changed: trusted_entry.is_some() && !same_key,
                     wants_pairing: !same_key && wants_pairing(id),
                 });
@@ -603,7 +679,7 @@ impl Engine {
                     let peer_name = targets.and_then(|targets| {
                         discovered
                             .values()
-                            .filter(|peer| peer.last_seen.elapsed() < ONLINE_WINDOW)
+                            .filter(|peer| peer.udp_online())
                             .find(|peer| targets.iter().any(|target| target.ip() == peer.ip))
                             .map(|peer| peer.device.name.clone())
                     });
@@ -644,6 +720,7 @@ impl Engine {
             virtual_addresses,
             firewall: lock(&inner.firewall).clone(),
             friend_requests: self.friend_requests(),
+            bluetooth: lock(&inner.bluetooth_status).clone(),
         }
     }
 
@@ -919,7 +996,7 @@ impl Engine {
                     keep
                 });
                 for peer in peers.values_mut() {
-                    let online = peer.last_seen.elapsed() < ONLINE_WINDOW;
+                    let online = peer.online();
                     if online != peer.was_online {
                         peer.was_online = online;
                         changed = true;
@@ -1055,7 +1132,7 @@ impl Inner {
 
     /// Annonce d'un appareil MagicPlus d'une autre version : on ne peut pas se parler, mais on le
     /// dit (page Appareils et barre d'état) au lieu de l'ignorer en silence.
-    fn note_other_version(&self, hello: &Hello, source: IpAddr) {
+    fn note_other_version(&self, hello: &Hello, source: &str) {
         let (Some(theirs), Some(ours)) = (protocol_number(&hello.protocol), protocol_number(PROTOCOL)) else { return };
         let id = &hello.device.id;
         if id.is_empty() || id.len() > 64 {
@@ -1096,12 +1173,12 @@ impl Inner {
 
     /// Enregistre une annonce reçue. `None` si elle est ignorée (la nôtre, invalide, autre
     /// version) ; sinon `Some(vrai)` si l'appareil est nouveau ou revient après un silence.
-    pub(crate) fn on_hello(&self, hello: Hello, source: IpAddr) -> Option<bool> {
+    pub(crate) fn on_hello(&self, hello: Hello, source: Source) -> Option<bool> {
         if hello.device.id == self.own_id() {
             return None;
         }
         if hello.protocol != PROTOCOL {
-            self.note_other_version(&hello, source);
+            self.note_other_version(&hello, &source.label());
             return None;
         }
         // Jamais de clé ni d'identifiant démesurés ou illisibles.
@@ -1143,22 +1220,40 @@ impl Inner {
         }
 
         let mut peers = lock(&self.peers);
-        let announce = peers.get(&id).is_none_or(|known| known.last_seen.elapsed() > ONLINE_WINDOW);
+        let announce = peers.get(&id).is_none_or(|known| !known.online());
         if peers.get(&id).is_some_and(|known| known.presence != presence) {
             self.touch();
         }
-        peers.insert(
-            id,
-            Discovered {
-                device,
-                presence,
-                fingerprint,
-                ip: source,
-                tcp_port: hello.tcp_port,
-                last_seen: Instant::now(),
-                was_online: true,
-            },
-        );
+        let now = Instant::now();
+        let entry = peers.entry(id).or_insert_with(|| Discovered {
+            device: device.clone(),
+            presence,
+            fingerprint: fingerprint.clone(),
+            ip: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            tcp_port: 0,
+            last_seen: now,
+            udp_seen: None,
+            bluetooth: None,
+            was_online: true,
+        });
+        // Autre clé qu'avant : on oublie les moyens de le joindre appris avec l'ancienne.
+        if entry.device.public_key != device.public_key {
+            entry.udp_seen = None;
+            entry.bluetooth = None;
+        }
+        entry.device = device;
+        entry.presence = presence;
+        entry.fingerprint = fingerprint;
+        entry.last_seen = now;
+        entry.was_online = true;
+        match source {
+            Source::Udp(ip) => {
+                entry.ip = ip;
+                entry.tcp_port = hello.tcp_port;
+                entry.udp_seen = Some(now);
+            }
+            Source::Bluetooth(address) => entry.bluetooth = Some((address, now)),
+        }
         drop(peers);
         // Il a été mis à jour : plus d'avertissement de version.
         if lock(&self.other_versions).remove(&hello_id).is_some() {
@@ -1201,13 +1296,13 @@ impl Inner {
         let peers = lock(&self.peers);
         let peer = peers.get(peer_id)?;
         // Si la clé annoncée a changé, on n'envoie rien (usurpation possible).
-        if peer.last_seen.elapsed() >= ONLINE_WINDOW || entry.public_key != peer.device.public_key {
+        if entry.public_key != peer.device.public_key {
             return None;
         }
         Some(Target {
             id: peer_id.to_string(),
             name: entry.name.clone(),
-            address: SocketAddr::new(peer.ip, peer.tcp_port),
+            route: peer.route()?,
             public_key: crypto::public_from_b64(&entry.public_key).ok()?,
         })
     }
@@ -1226,18 +1321,24 @@ impl Inner {
 
     /// Ouvre un canal chiffré (Noise) vers un appareil associé.
     pub(crate) fn connect(&self, target: &Target) -> Result<Channel> {
-        let stream = TcpStream::connect_timeout(&target.address, Duration::from_secs(5))
-            .map_err(|error| {
-                anyhow!(
-                    "{} injoignable ({error}) : son pare-feu bloque sans doute MagicPlus. Sur cet appareil, ouvrez \
-                     Appareils et cliquez sur « Autoriser MagicPlus » (Windows)",
-                    target.name
-                )
-            })?;
-        stream.set_nodelay(true).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        secure::connect(stream, &self.secret.to_bytes(), target.public_key.as_bytes(), &self.own_id())
+        let link: BoxLink = match &target.route {
+            Route::Tcp(address) => {
+                let stream = TcpStream::connect_timeout(address, Duration::from_secs(5)).map_err(|error| {
+                    anyhow!(
+                        "{} injoignable ({error}) : son pare-feu bloque sans doute MagicPlus. Sur cet appareil, ouvrez \
+                         Appareils et cliquez sur « Autoriser MagicPlus » (Windows)",
+                        target.name
+                    )
+                })?;
+                stream.set_nodelay(true).ok();
+                Box::new(stream)
+            }
+            Route::Bluetooth(address) => crate::bluetooth::open_session(address)
+                .map_err(|error| anyhow!("{} injoignable en Bluetooth : {error}", target.name))?,
+        };
+        link.set_write_timeout(Some(Duration::from_secs(30))).ok();
+        link.set_read_timeout(Some(Duration::from_secs(30))).ok();
+        secure::connect(link, &self.secret.to_bytes(), target.public_key.as_bytes(), &self.own_id())
     }
 
     fn send_text(&self, target: &Target, text: &str) -> Result<()> {
@@ -1248,7 +1349,7 @@ impl Inner {
             text: text.to_string(),
         };
         let sent = self.write_message(&mut channel, &message, &[]);
-        channel.get_ref().shutdown(std::net::Shutdown::Write).ok();
+        channel.finish().ok();
         match read_ack(&mut channel) {
             Some(ack) if ack.ok => Ok(()),
             Some(ack) => Err(anyhow!(explain_refusal(&ack, &target.name))),
@@ -1271,7 +1372,7 @@ impl Inner {
 
     /// Traite une connexion entrante : négociation Noise, puis messages chiffrés jusqu'à la fin.
     /// Les réponses (`Ack`) passent dans le même canal chiffré.
-    pub(crate) fn handle_connection(&self, stream: TcpStream) {
+    pub(crate) fn handle_connection(&self, stream: BoxLink) {
         stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         let (mut channel, remote_id) = match secure::accept(stream, &self.secret.to_bytes()) {
@@ -1303,7 +1404,7 @@ impl Inner {
                 self.set_status(format!("{name} veut vous envoyer quelque chose : associez-le dans la page Appareils"));
             }
             write_ack(&mut channel, &Ack::refused("cet appareil ne vous a pas encore associé", "not-paired"));
-            close_gracefully(channel.get_ref());
+            channel.get_ref().close_after_reply();
             return;
         };
 
@@ -1341,7 +1442,7 @@ impl Inner {
             self.suspend_incoming(&id, "interrompu — reprise automatique quand l'expéditeur revient");
         }
         write_ack(&mut channel, &failure.unwrap_or_else(Ack::ok));
-        close_gracefully(channel.get_ref());
+        channel.get_ref().close_after_reply();
     }
 
     fn handle_message(&self, sender: &SenderInfo, plain: &[u8], started: &mut Vec<String>) -> Result<Reply> {
@@ -1453,32 +1554,12 @@ impl Inner {
 // ------------------------------------------------------------------ petites aides
 
 /// Canal chiffré sur une connexion TCP.
-pub(crate) type Channel = SecureStream<TcpStream>;
+pub(crate) type Channel = SecureStream<BoxLink>;
 
 pub(crate) fn write_ack(channel: &mut Channel, ack: &Ack) {
     if let Ok(json) = serde_json::to_vec(ack) {
         let _ = channel.send(&json);
     }
-}
-
-/// Ferme une connexion entrante sans perdre la dernière réponse envoyée. Fermer un socket qui
-/// contient encore des données non lues envoie un RST, et Windows jette alors chez l'expéditeur
-/// les données qu'il n'avait pas encore lues (notre refus, par exemple). On cesse donc d'écrire
-/// et on lit ce qui arrive encore jusqu'à ce que l'expéditeur ferme (2 s et 1 Mo au plus).
-pub(crate) fn close_gracefully(stream: &TcpStream) {
-    use std::io::Read;
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    let mut reader = stream;
-    let mut buffer = [0_u8; 8192];
-    let mut drained = 0;
-    while drained < 1024 * 1024 {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(size) => drained += size,
-        }
-    }
-    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 pub(crate) fn read_ack(channel: &mut Channel) -> Option<Ack> {

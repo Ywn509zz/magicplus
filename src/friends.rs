@@ -14,7 +14,7 @@
 use crate::{
     chat::SenderInfo,
     crypto,
-    engine::{explain_refusal, lock, read_ack, refusal, Engine, Inner, Target, ONLINE_WINDOW},
+    engine::{explain_refusal, lock, read_ack, refusal, Engine, Inner, Target},
     protocol::{MemberInfo, Message},
     store::{Store, TrustedPeer},
     util::now_ms,
@@ -173,13 +173,13 @@ impl Inner {
     fn reachable(&self, id: &str, name: &str, public_key: &str) -> Option<Target> {
         let peers = lock(&self.peers);
         let peer = peers.get(id)?;
-        if peer.last_seen.elapsed() >= ONLINE_WINDOW || peer.device.public_key != public_key {
+        if peer.device.public_key != public_key {
             return None;
         }
         Some(Target {
             id: id.to_string(),
             name: name.to_string(),
-            address: std::net::SocketAddr::new(peer.ip, peer.tcp_port),
+            route: peer.route()?,
             public_key: crypto::public_from_b64(public_key).ok()?,
         })
     }
@@ -253,7 +253,7 @@ impl Inner {
         let target = self.reachable(&request.id, &request.name, &request.public_key).ok_or_else(|| anyhow!("hors ligne"))?;
         let mut channel = self.connect(&target)?;
         self.write_message(&mut channel, &Message::FriendRequest { conversation: request.conversation.clone() }, &[])?;
-        let _ = channel.get_ref().shutdown(std::net::Shutdown::Write);
+        let _ = channel.finish();
         let ack = read_ack(&mut channel).ok_or_else(|| anyhow!("{} ne répond pas", target.name))?;
         if !ack.ok {
             bail!("{}", explain_refusal(&ack, &target.name));
@@ -280,7 +280,7 @@ impl Inner {
         let target = self.reachable(&answer.id, &answer.name, &answer.public_key).ok_or_else(|| anyhow!("hors ligne"))?;
         let mut channel = self.connect(&target)?;
         self.write_message(&mut channel, &Message::FriendAnswer { accepted: answer.accepted }, &[])?;
-        let _ = channel.get_ref().shutdown(std::net::Shutdown::Write);
+        let _ = channel.finish();
         match read_ack(&mut channel) {
             Some(ack) if ack.ok => {
                 let mut friends = lock(&self.friends);

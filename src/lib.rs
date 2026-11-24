@@ -2,6 +2,7 @@
 
 pub mod animation;
 pub mod autostart;
+mod bluetooth;
 pub mod canvas;
 pub mod chat;
 pub mod crypto;
@@ -12,6 +13,7 @@ pub mod firewall;
 pub mod friends;
 pub mod highlight;
 pub mod markdown;
+mod link;
 mod net;
 pub mod presence;
 pub mod profile;
