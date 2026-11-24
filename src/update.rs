@@ -126,7 +126,7 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 // ------------------------------------------------------------------ réseau (curl)
 
-fn curl() -> Command {
+pub(crate) fn curl() -> Command {
     let mut command = Command::new("curl");
     #[cfg(target_os = "windows")]
     {

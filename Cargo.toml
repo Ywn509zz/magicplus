@@ -21,7 +21,7 @@ crypto_box = "0.9"
 dirs = "6"
 global-hotkey = "0.7"
 if-addrs = "0.13"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,9 +36,15 @@ yrs = "0.28"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Interface Slint (Windows, Linux). Sur Mac, seulement avec `--features slint-on-mac` (essais).
 slint = { version = "1", optional = true }
+# Catalogue des émojis Unicode (sélecteur, recherche, noms).
+emojis = "0.9.1"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 slint = "1"
+
+# Notifications du système (Windows : centre de notifications, avec clic).
+[target.'cfg(target_os = "windows")'.dependencies]
+tauri-winrt-notification = "0.7"
 
 # Interface AppKit native (macOS).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -46,6 +52,9 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-quartz-core = "0.3"
+# Notifications du système (macOS : centre de notifications, avec clic).
+objc2-user-notifications = "0.3"
+block2 = "0.6"
 
 [features]
 # Développement : lance l'interface Windows (Slint) sur un Mac pour la regarder ou la photographier.

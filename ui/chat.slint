@@ -4,7 +4,7 @@
 // autocollants, accusés de lecture et « en train d'écrire ». Rien ne dépend d'Internet.
 // Les données viennent de Rust (src/ui_slint/chat.rs) par le global `ChatData`.
 
-import { Button, LineEdit, CheckBox, ScrollView, TextEdit, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, CheckBox, ScrollView, ListView, TextEdit, ProgressIndicator } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { MarkdownView, BlockItem } from "markdown.slint";
 import { Avatar, ProfileCard, ProfileItem } from "profile.slint";
@@ -17,6 +17,8 @@ export struct ConversationItem {
     unread: int,
     group: bool,
     online: bool,
+    // Présence de l'autre (discussion à deux) : 0 hors ligne, 1 en ligne, 2 inactif, 3 ne pas déranger.
+    presence: int,
     typing: bool,
     selected: bool,
     initials: string,
@@ -30,6 +32,50 @@ export struct ReactionItem {
     count: int,
     mine: bool,
     names: string,
+    // Émoji personnalisé : son image (animée si `frames` en a plusieurs).
+    custom: bool,
+    image: image,
+    frames: [image],
+    frame-ms: int,
+}
+
+// Case du sélecteur d'émojis : un émoji Unicode (`text`) ou personnalisé (`image`).
+export struct EmojiCell {
+    text: string,
+    image: image,
+    frames: [image],
+    frame-ms: int,
+    // Ce qui est envoyé (texte Unicode ou `<:nom:id>`), nom affiché dans l'aperçu.
+    token: string,
+    name: string,
+    favorite: bool,
+    // Émoji personnalisé à nous (supprimable).
+    mine: bool,
+}
+
+// Ligne du sélecteur : un titre de section, ou des cases.
+export struct EmojiRow {
+    header: string,
+    cells: [EmojiCell],
+}
+
+// GIF de GIPHY dans le sélecteur : aperçu animé.
+export struct GifItem {
+    id: string,
+    title: string,
+    image: image,
+    frames: [image],
+    frame-ms: int,
+    favorite: bool,
+}
+
+// Morceau d'un message avec émojis personnalisés dans le texte.
+export struct InlinePiece {
+    text: string,
+    is-image: bool,
+    image: image,
+    frames: [image],
+    frame-ms: int,
 }
 
 export struct AttachmentItem {
@@ -52,6 +98,9 @@ export struct MessageItem {
     author-id: string,
     photo: image,
     has-photo: bool,
+    // Photo animée (GIF) : animée au survol du message, comme Discord.
+    photo-frames: [image],
+    photo-frame-ms: int,
     initials: string,
     color: color,
     mine: bool,
@@ -69,7 +118,19 @@ export struct MessageItem {
     deleted: bool,
     edited: bool,
     jumbo: bool,
+    // Émojis seuls, dont des personnalisés : affichés en grand, en images.
+    big-emojis: [EmojiCell],
+    // Texte simple avec émojis personnalisés : morceaux de texte et images, sur une ligne.
+    inline: [InlinePiece],
+    // Réponse à un message (comme Discord : petite photo, @auteur et extrait au-dessus).
+    has-reply: bool,
     reply: string,
+    reply-author: string,
+    reply-author-id: string,
+    reply-photo: image,
+    reply-has-photo: bool,
+    reply-initials: string,
+    reply-color: color,
     attachments: [AttachmentItem],
     reactions: [ReactionItem],
     status: string,
@@ -140,6 +201,38 @@ export global ChatData {
     in-out property <int> profile-request;
     // Animation des GIF : avance de 1 toutes les 50 ms.
     in property <int> tick;
+
+    // Présence de l'autre (discussion à deux).
+    in property <int> presence;
+
+    // ---- GIF de GIPHY (recherche, tendances, favoris)
+    in property <[GifItem]> gifs;
+    in property <bool> giphy-ready;
+    in property <string> gif-status;
+    in-out property <string> gif-query;
+    // 0 : tendances ou recherche ; 1 : favoris.
+    in-out property <int> gif-tab;
+    // Ouvre le sélecteur de GIF (captures d'écran de développement).
+    in property <int> gif-request;
+    callback gif-search();
+    callback gif-send(string);
+    callback gif-favorite(string);
+    callback gif-save-key(string);
+    callback open-giphy-signup();
+
+    // ---- sélecteur d'émojis (écrire et réagir)
+    in property <[EmojiRow]> emoji-rows;
+    in property <[string]> emoji-tabs;
+    in-out property <int> emoji-tab;
+    in-out property <string> emoji-search;
+    // Ouvre le sélecteur d'émojis de la zone de saisie (captures d'écran de développement).
+    in property <int> emoji-request;
+    callback emoji-filter-changed();
+    // `reaction` : réagir au message `actions-index` (sinon : écrire).
+    callback emoji-picked(EmojiCell, bool);
+    callback emoji-favorite(EmojiCell);
+    callback emoji-add();
+    callback emoji-remove(EmojiCell);
 
     // ---- boîtes de dialogue : 0 aucune, 1 nouveau groupe, 2 ajouter des membres, 3 renommer,
     // 4 supprimer un message, 5 quitter le groupe
@@ -246,6 +339,382 @@ component EmojiButton inherits Rectangle {
     }
 }
 
+// Une image animée (GIF) ou fixe : `frames` contient les images d'un GIF, `image` la première.
+component AnimatedImage inherits Image {
+    in property <image> still;
+    in property <[image]> frames;
+    in property <int> frame-ms: 100;
+    source: root.frames.length > 1 ? root.frames[Math.mod(Math.floor(ChatData.tick * 50 / Math.max(root.frame-ms, 20)), root.frames.length)] : root.still;
+    image-fit: contain;
+}
+
+// Une case du sélecteur : émoji Unicode en texte, ou image (animée) d'un émoji personnalisé.
+component EmojiTile inherits Rectangle {
+    in property <EmojiCell> cell;
+    in property <length> size: 40px;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked;
+    callback right-clicked;
+    width: root.size;
+    height: root.size;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.nav-selected : touch.has-hover ? Theme.nav-hover : transparent;
+
+    if root.cell.text != "": Text {
+        text: root.cell.text;
+        font-size: root.size * 0.6;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if root.cell.text == "": AnimatedImage {
+        still: root.cell.image;
+        frames: root.cell.frames;
+        frame-ms: root.cell.frame-ms;
+        width: root.size * 0.7;
+        height: root.size * 0.7;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.right-clicked();
+            }
+        }
+    }
+}
+
+// Sélecteur d'émojis complet, comme Discord : recherche, favoris et récents, émojis
+// personnalisés, catégories. Clic : choisir ; clic droit (ou étoile) : favori.
+component EmojiPicker inherits Rectangle {
+    callback picked(EmojiCell);
+    property <EmojiCell> preview;
+    property <bool> has-preview;
+    background: Theme.popup;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000040;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            LineEdit {
+                text <=> ChatData.emoji-search;
+                placeholder-text: "Rechercher (en anglais : smile, cat…)";
+                horizontal-stretch: 1;
+                edited => {
+                    ChatData.emoji-filter-changed();
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/plus.svg");
+                tint: Theme.accent;
+                clicked => {
+                    ChatData.emoji-add();
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 2px;
+            alignment: start;
+            for tab[i] in ChatData.emoji-tabs: Rectangle {
+                width: 32px;
+                height: 30px;
+                border-radius: 6px;
+                background: ChatData.emoji-tab == i && ChatData.emoji-search == "" ? Theme.nav-selected : tab-touch.has-hover ? Theme.nav-hover : transparent;
+                Text {
+                    text: tab;
+                    font-size: 16px;
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                tab-touch := TouchArea {
+                    clicked => {
+                        ChatData.emoji-tab = i;
+                        ChatData.emoji-search = "";
+                        ChatData.emoji-filter-changed();
+                    }
+                }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in ChatData.emoji-rows: VerticalLayout {
+                if row.header != "": Text {
+                    text: row.header;
+                    color: Theme.subtle;
+                    font-size: 11px;
+                    font-weight: 700;
+                    min-height: 26px;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+                if row.cells.length > 0: HorizontalLayout {
+                    alignment: start;
+                    for cell in row.cells: EmojiTile {
+                        cell: cell;
+                        clicked => {
+                            root.picked(cell);
+                        }
+                        right-clicked => {
+                            ChatData.emoji-favorite(cell);
+                        }
+                        changed hovered => {
+                            if self.hovered {
+                                root.preview = cell;
+                                root.has-preview = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Aperçu de l'émoji survolé : nom, favori, suppression (émojis à nous).
+        Rectangle {
+            height: 44px;
+            border-radius: 8px;
+            background: Theme.bubble.with-alpha(0.6);
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 4px;
+                spacing: 8px;
+                if root.has-preview: VerticalLayout {
+                    alignment: center;
+                    EmojiTile {
+                        cell: root.preview;
+                        size: 36px;
+                    }
+                }
+                Text {
+                    text: root.has-preview ? root.preview.name : "Clic droit sur un émoji : favori";
+                    color: root.has-preview ? Theme.text : Theme.subtle;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.has-preview: Rectangle {
+                    width: 34px;
+                    star-touch := TouchArea {
+                        clicked => {
+                            ChatData.emoji-favorite(root.preview);
+                            root.preview.favorite = !root.preview.favorite;
+                        }
+                    }
+                    Text {
+                        text: root.preview.favorite ? "★" : "☆";
+                        color: root.preview.favorite ? Theme.warning : star-touch.has-hover ? Theme.text : Theme.subtle;
+                        font-size: 20px;
+                        width: parent.width;
+                        height: parent.height;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.has-preview && root.preview.mine: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: @image-url("icons/delete.svg");
+                        tint: Theme.danger;
+                        clicked => {
+                            ChatData.emoji-remove(root.preview);
+                            root.has-preview = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Sélecteur de GIF (GIPHY) : recherche, tendances, favoris (étoile sur chaque GIF).
+component GifPicker inherits Rectangle {
+    callback sent;
+    property <string> key-draft;
+    property <length> tile-w: (self.width - 16px - 12px - 8px) / 3;
+    background: Theme.popup;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000040;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        if !ChatData.giphy-ready: VerticalLayout {
+            spacing: 8px;
+            padding: 6px;
+            Text {
+                text: "Recherche de GIF avec GIPHY";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            Text {
+                text: "Il faut une clé d'API GIPHY (gratuite). Créez-la sur developers.giphy.com (« Create an API Key », type API), puis collez-la ici. C'est le seul usage d'Internet avec les mises à jour : les GIF envoyés partent ensuite directement vers vos contacts.";
+                color: Theme.subtle;
+                font-size: 12.5px;
+                wrap: word-wrap;
+            }
+            Button {
+                text: "Créer une clé sur GIPHY…";
+                clicked => {
+                    ChatData.open-giphy-signup();
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                LineEdit {
+                    text <=> root.key-draft;
+                    placeholder-text: "Clé d'API GIPHY";
+                    horizontal-stretch: 1;
+                    accepted => {
+                        ChatData.gif-save-key(root.key-draft);
+                    }
+                }
+                Button {
+                    text: "Enregistrer";
+                    primary: true;
+                    enabled: root.key-draft != "";
+                    clicked => {
+                        ChatData.gif-save-key(root.key-draft);
+                    }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+            }
+        }
+
+        if ChatData.giphy-ready: HorizontalLayout {
+            spacing: 6px;
+            LineEdit {
+                text <=> ChatData.gif-query;
+                placeholder-text: "Rechercher sur GIPHY";
+                horizontal-stretch: 1;
+                accepted => {
+                    ChatData.gif-tab = 0;
+                    ChatData.gif-search();
+                }
+            }
+        }
+
+        if ChatData.giphy-ready: HorizontalLayout {
+            spacing: 4px;
+            alignment: start;
+            for tab[i] in [ChatData.gif-query == "" ? "🔥 Tendances" : "🔎 Résultats", "⭐ Favoris"]: Rectangle {
+                width: label.preferred-width + 20px;
+                height: 28px;
+                border-radius: 6px;
+                background: ChatData.gif-tab == i ? Theme.nav-selected : tab-touch.has-hover ? Theme.nav-hover : transparent;
+                label := Text {
+                    text: tab;
+                    color: ChatData.gif-tab == i ? Theme.text : Theme.subtle;
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                tab-touch := TouchArea {
+                    clicked => {
+                        ChatData.gif-tab = i;
+                        ChatData.gif-search();
+                    }
+                }
+            }
+        }
+
+        if ChatData.giphy-ready: ScrollView {
+            vertical-stretch: 1;
+            content-height: Math.ceil(ChatData.gifs.length / 3) * (root.tile-w * 0.8 + 4px);
+            for gif[i] in ChatData.gifs: Rectangle {
+                x: Math.mod(i, 3) * (root.tile-w + 4px);
+                y: Math.floor(i / 3) * (root.tile-w * 0.8 + 4px);
+                width: root.tile-w;
+                height: root.tile-w * 0.8;
+                border-radius: 6px;
+                background: Theme.bubble;
+                clip: true;
+                AnimatedImage {
+                    still: gif.image;
+                    frames: gif.frames;
+                    frame-ms: gif.frame-ms;
+                    width: parent.width;
+                    height: parent.height;
+                    image-fit: cover;
+                }
+                gif-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        ChatData.gif-send(gif.id);
+                        root.sent();
+                    }
+                }
+                if gif-touch.has-hover || gif.favorite: Rectangle {
+                    x: parent.width - 30px;
+                    y: 4px;
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 13px;
+                    background: #000000a0;
+                    Text {
+                        text: gif.favorite ? "★" : "☆";
+                        color: gif.favorite ? #ffd43b : #ffffff;
+                        font-size: 15px;
+                        width: parent.width;
+                        height: parent.height;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        clicked => {
+                            ChatData.gif-favorite(gif.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ChatData.giphy-ready: HorizontalLayout {
+            Text {
+                text: ChatData.gif-status;
+                color: Theme.subtle;
+                font-size: 11px;
+                overflow: elide;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "Powered by GIPHY";
+                color: Theme.subtle;
+                font-size: 10px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 component Divider inherits Rectangle {
     height: 1px;
     background: Theme.card-border;
@@ -279,6 +748,7 @@ component ConversationRow inherits Rectangle {
                 size: 38px;
                 show-presence: !root.item.group;
                 online: root.item.online;
+                presence: root.item.presence;
             }
         }
 
@@ -335,7 +805,7 @@ component ReactionPill inherits Rectangle {
     border-width: 1px;
     border-color: root.reaction.mine ? Theme.accent : touch.has-hover ? Theme.card-border : transparent;
 
-    label := Text {
+    if !root.reaction.custom: Text {
         text: root.reaction.emoji + " " + root.reaction.count;
         color: root.reaction.mine ? Theme.accent : Theme.text;
         font-size: 13px;
@@ -345,6 +815,32 @@ component ReactionPill inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+    if root.reaction.custom: HorizontalLayout {
+        alignment: center;
+        spacing: 5px;
+        AnimatedImage {
+            still: root.reaction.image;
+            frames: root.reaction.frames;
+            frame-ms: root.reaction.frame-ms;
+            width: 18px;
+            height: 18px;
+            y: 4px;
+        }
+        Text {
+            text: root.reaction.count;
+            color: root.reaction.mine ? Theme.accent : Theme.text;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+    // Largeur mesurée (texte, ou image + nombre).
+    label := Text {
+        text: root.reaction.custom ? "WW " + root.reaction.count : root.reaction.emoji + " " + root.reaction.count;
+        font-size: 13px;
+        font-weight: 600;
+        visible: false;
+    }
 
     touch := TouchArea {
         clicked => {
@@ -353,14 +849,6 @@ component ReactionPill inherits Rectangle {
     }
 }
 
-// Une image animée (GIF) ou fixe : `frames` contient les images d'un GIF, `image` la première.
-component AnimatedImage inherits Image {
-    in property <image> still;
-    in property <[image]> frames;
-    in property <int> frame-ms: 100;
-    source: root.frames.length > 1 ? root.frames[Math.mod(Math.floor(ChatData.tick * 50 / Math.max(root.frame-ms, 20)), root.frames.length)] : root.still;
-    image-fit: contain;
-}
 
 component FileCard inherits Rectangle {
     in property <AttachmentItem> item;
@@ -575,187 +1063,256 @@ component MessageRow inherits Rectangle {
                 root.open-actions(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
-        body := HorizontalLayout {
+        body := VerticalLayout {
             padding-left: 16px;
             padding-right: 24px;
-            padding-top: root.message.header ? 12px : 2px;
-            padding-bottom: 2px;
-            spacing: 14px;
+            padding-top: root.message.header ? 14px : 1px;
+            padding-bottom: 1px;
+            spacing: 2px;
 
-            if root.message.header: VerticalLayout {
-                alignment: start;
-                Avatar {
-                    initials: root.message.initials;
-                    tint: root.message.color;
-                    photo: root.message.photo;
-                    has-photo: root.message.has-photo;
-                    size: 38px;
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            ChatData.show-profile(root.message.author-id);
+            // Réponse, comme Discord : un trait courbe part de la photo vers la petite photo
+            // de l'auteur cité, son @nom et le début de son message.
+            if root.message.has-reply: Rectangle {
+                height: 20px;
+                Path {
+                    x: 18px;
+                    y: 9px;
+                    width: 30px;
+                    height: 13px;
+                    viewbox-width: 30;
+                    viewbox-height: 13;
+                    commands: "M 1 13 L 1 6 Q 1 1 6 1 L 30 1";
+                    stroke: Theme.reply-line;
+                    stroke-width: 2px;
+                    fill: transparent;
+                }
+                HorizontalLayout {
+                    x: 52px;
+                    width: parent.width - 52px;
+                    spacing: 5px;
+                    alignment: start;
+                    if root.message.reply-author != "": VerticalLayout {
+                        alignment: center;
+                        Avatar {
+                            initials: root.message.reply-initials;
+                            tint: root.message.reply-color;
+                            photo: root.message.reply-photo;
+                            has-photo: root.message.reply-has-photo;
+                            size: 16px;
                         }
                     }
-                }
-            }
-            if !root.message.header: Rectangle {
-                width: 38px;
-            }
-
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 4px;
-
-                if root.message.reply != "": HorizontalLayout {
-                    spacing: 6px;
-                    Image {
-                        source: @image-url("icons/reply.svg");
-                        colorize: Theme.subtle;
-                        width: 14px;
-                        height: 14px;
-                        y: 2px;
+                    if root.message.reply-author != "": Text {
+                        text: "@" + root.message.reply-author;
+                        color: Theme.text.with-alpha(0.85);
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                ChatData.show-profile(root.message.reply-author-id);
+                            }
+                        }
                     }
                     Text {
                         text: root.message.reply;
                         color: Theme.subtle;
-                        font-size: 12px;
+                        font-size: 13px;
                         overflow: elide;
+                        vertical-alignment: center;
                         horizontal-stretch: 1;
                     }
                 }
+            }
 
-                if root.message.header: HorizontalLayout {
-                    spacing: 8px;
+            HorizontalLayout {
+                spacing: 14px;
+
+                if root.message.header: VerticalLayout {
                     alignment: start;
-                    Text {
-                        text: root.message.author;
-                        color: root.message.mine ? Theme.accent : Theme.text;
-                        font-size: 14px;
-                        font-weight: 600;
-                    }
-                    Text {
-                        text: root.message.time;
-                        color: Theme.subtle;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                if root.message.forwarded != "": Text {
-                    text: "↪ Transféré · message de " + root.message.forwarded;
-                    color: Theme.subtle;
-                    font-size: 11.5px;
-                    font-italic: true;
-                }
-                if root.message.deleted || root.message.has-text: HorizontalLayout {
-                    alignment: start;
-                    Rectangle {
-                        max-width: root.bubble-max;
-                        preferred-width: bubble.preferred-width;
-                        preferred-height: bubble.preferred-height;
-                        min-height: bubble.min-height;
-                        border-radius: 14px;
-                        background: root.message.jumbo && !root.message.deleted ? transparent : root.message.mine ? Theme.mine-bubble : Theme.bubble;
-
-                        bubble := VerticalLayout {
-                            padding-left: root.message.jumbo ? 2px : 12px;
-                            padding-right: root.message.jumbo ? 2px : 12px;
-                            padding-top: 7px;
-                            padding-bottom: 7px;
-                            spacing: 2px;
-
-                            if root.message.deleted: Text {
-                                text: "Message supprimé";
-                                color: Theme.subtle;
-                                font-size: 13px;
-                                font-italic: true;
-                            }
-                            if !root.message.deleted && root.message.jumbo: Text {
-                                text: root.message.plain;
-                                font-size: 34px;
-                            }
-                            if !root.message.deleted && !root.message.jumbo: MarkdownView {
-                                blocks: root.message.blocks;
-                                link-clicked(url) => {
-                                    ChatData.open-link(url);
-                                }
-                            }
-                            if root.message.edited && !root.message.deleted: Text {
-                                text: "(modifié)";
-                                color: Theme.subtle;
-                                font-size: 10px;
-                            }
-                        }
-                    }
-                }
-
-                for item in root.message.attachments: HorizontalLayout {
-                    alignment: start;
-                    if item.kind == 0: Rectangle {
-                        width: item.width;
-                        height: item.height;
-                        border-radius: 8px;
-                        clip: true;
-                        AnimatedImage {
-                            still: item.image;
-                            frames: item.frames;
-                            frame-ms: item.frame-ms;
-                            width: parent.width;
-                            height: parent.height;
-                        }
+                    Avatar {
+                        initials: root.message.initials;
+                        tint: root.message.color;
+                        photo: root.message.photo;
+                        has-photo: root.message.has-photo;
+                        frames: root.message.photo-frames;
+                        frame-ms: root.message.photo-frame-ms;
+                        animate: hover.has-hover;
+                        size: 38px;
                         TouchArea {
                             mouse-cursor: MouseCursor.pointer;
                             clicked => {
-                                ChatData.open-path(item.path);
+                                ChatData.show-profile(root.message.author-id);
                             }
                         }
                     }
-                    if item.kind == 3: Rectangle {
-                        width: item.width;
-                        height: item.height;
-                        border-radius: 8px;
-                        background: Theme.bubble;
+                }
+                if !root.message.header: Rectangle {
+                    width: 38px;
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+
+                    if root.message.header: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
                         Text {
-                            text: "Chargement…";
+                            text: root.message.author;
+                            color: root.message.mine ? Theme.accent : Theme.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: root.message.time;
                             color: Theme.subtle;
-                            font-size: 12px;
-                            width: parent.width;
-                            height: parent.height;
-                            horizontal-alignment: center;
+                            font-size: 11px;
                             vertical-alignment: center;
                         }
                     }
-                    if item.kind == 1 || item.kind == 2: FileCard {
-                        item: item;
-                        open(path) => {
-                            ChatData.open-path(path);
-                        }
-                    }
-                }
 
-                if root.message.reactions.length > 0: HorizontalLayout {
-                    spacing: 4px;
-                    alignment: start;
-                    for reaction in root.message.reactions: ReactionPill {
-                        reaction: reaction;
-                        clicked => {
-                            if root.can-act {
-                                ChatData.toggle-reaction(root.index, reaction.emoji);
+                    if root.message.forwarded != "": Text {
+                        text: "↪ Transféré · message de " + root.message.forwarded;
+                        color: Theme.subtle;
+                        font-size: 11.5px;
+                        font-italic: true;
+                    }
+                    // Texte sans bulle, sur toute la largeur (comme Discord).
+                    if root.message.deleted || root.message.has-text: VerticalLayout {
+                        spacing: 2px;
+                        if root.message.deleted: Text {
+                            text: "Message supprimé";
+                            color: Theme.subtle;
+                            font-size: 13px;
+                            font-italic: true;
+                        }
+                        if !root.message.deleted && root.message.big-emojis.length > 0: HorizontalLayout {
+                        alignment: start;
+                        spacing: 4px;
+                        for cell in root.message.big-emojis: Rectangle {
+                            width: 48px;
+                            height: 48px;
+                            if cell.text != "": Text {
+                                text: cell.text;
+                                font-size: 34px;
+                                vertical-alignment: center;
+                            }
+                            if cell.text == "": AnimatedImage {
+                                still: cell.image;
+                                frames: cell.frames;
+                                frame-ms: cell.frame-ms;
+                                width: 48px;
+                                height: 48px;
                             }
                         }
                     }
-                }
+                    if !root.message.deleted && root.message.inline.length > 0: HorizontalLayout {
+                        alignment: start;
+                        spacing: 0px;
+                        for piece in root.message.inline: HorizontalLayout {
+                            if !piece.is-image: Text {
+                                text: piece.text;
+                                color: Theme.text;
+                                font-size: 14px;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                            if piece.is-image: AnimatedImage {
+                                still: piece.image;
+                                frames: piece.frames;
+                                frame-ms: piece.frame-ms;
+                                width: 22px;
+                                height: 22px;
+                            }
+                        }
+                    }
+                    if !root.message.deleted && root.message.jumbo && root.message.big-emojis.length == 0: Text {
+                            text: root.message.plain;
+                            font-size: 34px;
+                        }
+                        if !root.message.deleted && !root.message.jumbo && root.message.big-emojis.length == 0 && root.message.inline.length == 0: MarkdownView {
+                            blocks: root.message.blocks;
+                            link-clicked(url) => {
+                                ChatData.open-link(url);
+                            }
+                        }
+                        if root.message.edited && !root.message.deleted: Text {
+                            text: "(modifié)";
+                            color: Theme.subtle;
+                            font-size: 10px;
+                        }
+                    }
 
-                if root.message.pinned-by != "": Text {
-                    text: "📌 Épinglé par " + root.message.pinned-by;
-                    color: Theme.subtle;
-                    font-size: 11px;
+                    for item in root.message.attachments: HorizontalLayout {
+                        alignment: start;
+                        if item.kind == 0: Rectangle {
+                            width: item.width;
+                            height: item.height;
+                            border-radius: 8px;
+                            clip: true;
+                            AnimatedImage {
+                                still: item.image;
+                                frames: item.frames;
+                                frame-ms: item.frame-ms;
+                                width: parent.width;
+                                height: parent.height;
+                            }
+                            TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    ChatData.open-path(item.path);
+                                }
+                            }
+                        }
+                        if item.kind == 3: Rectangle {
+                            width: item.width;
+                            height: item.height;
+                            border-radius: 8px;
+                            background: Theme.bubble;
+                            Text {
+                                text: "Chargement…";
+                                color: Theme.subtle;
+                                font-size: 12px;
+                                width: parent.width;
+                                height: parent.height;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if item.kind == 1 || item.kind == 2: FileCard {
+                            item: item;
+                            open(path) => {
+                                ChatData.open-path(path);
+                            }
+                        }
+                    }
+
+                    if root.message.reactions.length > 0: HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+                        for reaction in root.message.reactions: ReactionPill {
+                            reaction: reaction;
+                            clicked => {
+                                if root.can-act {
+                                    ChatData.toggle-reaction(root.index, reaction.emoji);
+                                }
+                            }
+                        }
+                    }
+
+                    if root.message.pinned-by != "": Text {
+                        text: "📌 Épinglé par " + root.message.pinned-by;
+                        color: Theme.subtle;
+                        font-size: 11px;
+                    }
+                    if root.message.status != "": Text {
+                        text: root.message.status;
+                        color: Theme.subtle;
+                        font-size: 11px;
+                    }
                 }
-                if root.message.status != "": Text {
-                    text: root.message.status;
-                    color: Theme.subtle;
-                    font-size: 11px;
-                }
+        
             }
         }
 
@@ -823,17 +1380,15 @@ component MessageRow inherits Rectangle {
 // Zone de saisie : pièce jointe, texte (Entrée envoie, Maj+Entrée va à la ligne, Ctrl+V colle
 // aussi les images et les fichiers), émojis, autocollants, envoi.
 component Composer inherits Rectangle {
+    property <int> emoji-request: ChatData.emoji-request;
+    changed emoji-request => {
+        emoji-popup.show();
+    }
+    property <int> gif-request: ChatData.gif-request;
+    changed gif-request => {
+        gif-popup.show();
+    }
     property <int> focus-request: ChatData.focus-request;
-    property <[string]> emojis: [
-        "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣",
-        "😊", "😇", "🙂", "😉", "😍", "🥰", "😘", "😋",
-        "😜", "🤪", "😎", "🤩", "🥳", "😏", "😴", "🤔",
-        "🤗", "🤭", "😬", "🙄", "😮", "😢", "😭", "😡",
-        "👍", "👎", "👏", "🙌", "🙏", "💪", "👋", "🤝",
-        "❤️", "🧡", "💛", "💚", "💙", "💜", "🔥", "✨",
-        "🎉", "🎂", "☕", "🍕", "⚽", "🎮", "🎵", "📎",
-        "✅", "❌", "⚠️", "💡", "⏰", "📌", "🚀", "👀"
-    ];
     // Hauteur du texte saisi, mesurée par un Text invisible (la zone grandit jusqu'à 6 lignes).
     property <length> composer-height: Math.clamp(measure.preferred-height + 20px, 40px, 150px);
     preferred-height: layout.preferred-height;
@@ -911,6 +1466,38 @@ component Composer inherits Rectangle {
                         emoji-popup.show();
                     }
                 }
+                // GIF de GIPHY.
+                Rectangle {
+                    width: 34px;
+                    height: 34px;
+                    border-radius: 6px;
+                    background: gif-touch.has-hover || gif-popup.is-open ? Theme.nav-hover : transparent;
+                    Rectangle {
+                        width: 24px;
+                        height: 16px;
+                        border-radius: 3px;
+                        border-width: 1.6px;
+                        border-color: gif-touch.has-hover || gif-popup.is-open ? Theme.text : Theme.subtle;
+                        Text {
+                            text: "GIF";
+                            color: gif-touch.has-hover || gif-popup.is-open ? Theme.text : Theme.subtle;
+                            font-size: 8.5px;
+                            font-weight: 800;
+                            width: parent.width;
+                            height: parent.height;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    gif-touch := TouchArea {
+                        clicked => {
+                            gif-popup.show();
+                            if ChatData.gifs.length == 0 {
+                                ChatData.gif-search();
+                            }
+                        }
+                    }
+                }
                 IconButton {
                     icon: @image-url("icons/sticker.svg");
                     active: sticker-popup.is-open;
@@ -945,26 +1532,25 @@ component Composer inherits Rectangle {
     emoji-popup := PopupWindow {
         x: root.width - self.width;
         y: -self.height - 8px;
-        width: 8 * 38px + 16px;
-        height: 8 * 38px + 16px;
+        width: 9 * 40px + 34px;
+        height: 460px;
         close-policy: close-on-click-outside;
+        EmojiPicker {
+            picked(cell) => {
+                ChatData.emoji-picked(cell, false);
+            }
+        }
+    }
 
-        Rectangle {
-            background: Theme.popup;
-            border-radius: 10px;
-            border-width: 1px;
-            border-color: Theme.card-border;
-            drop-shadow-blur: 12px;
-            drop-shadow-color: #00000040;
-
-            for emoji[i] in root.emojis: EmojiButton {
-                x: 8px + Math.mod(i, 8) * 38px;
-                y: 8px + Math.floor(i / 8) * 38px;
-                size: 38px;
-                emoji: emoji;
-                clicked => {
-                    ChatData.draft += emoji;
-                }
+    gif-popup := PopupWindow {
+        x: root.width - self.width;
+        y: -self.height - 8px;
+        width: 420px;
+        height: 460px;
+        close-policy: close-on-click-outside;
+        GifPicker {
+            sent => {
+                gif-popup.close();
             }
         }
     }
@@ -1140,6 +1726,7 @@ HorizontalLayout {
                         size: 34px;
                         show-presence: !ChatData.is-group;
                         online: ChatData.online;
+                        presence: ChatData.presence;
                         ring: Theme.chat-bg;
                         TouchArea {
                             enabled: !ChatData.is-group;
@@ -1366,15 +1953,6 @@ HorizontalLayout {
     property <int> actions-request: ChatData.actions-request;
     property <length> menu-x: Math.max(8px, Math.min(ChatData.actions-x - root.absolute-position.x, root.width - 268px));
     property <length> menu-y: ChatData.actions-y - root.absolute-position.y;
-    property <[string]> reaction-emojis: [
-        "👍", "👎", "❤️", "🔥", "😂", "🤣", "😮", "😢",
-        "😭", "😡", "🎉", "🙏", "👏", "🙌", "💪", "👀",
-        "✅", "❌", "⭐", "💯", "🤔", "😍", "🥰", "😎",
-        "🤩", "🥳", "😴", "🤯", "😱", "🤗", "😇", "😅",
-        "🙃", "😬", "🫡", "🤝", "👋", "✌️", "🤞", "💡",
-        "📌", "🚀", "🍕", "☕", "🎵", "🎮", "🌞", "🦀"
-    ];
-    property <string> other-emoji;
     changed actions-request => {
         actions-popup.show();
     }
@@ -1473,55 +2051,15 @@ HorizontalLayout {
     }
 
     reaction-popup := PopupWindow {
-        x: Math.max(8px, Math.min(ChatData.actions-x - root.absolute-position.x, root.width - 300px));
+        x: Math.max(8px, Math.min(ChatData.actions-x - root.absolute-position.x, root.width - self.width - 8px));
         y: Math.max(8px, Math.min(root.menu-y, root.height - self.height - 8px));
-        width: 8 * 34px + 20px;
-        height: 6 * 34px + 84px;
+        width: 9 * 40px + 34px;
+        height: 460px;
         close-policy: close-on-click-outside;
-        MenuPanel {
-            MenuTitle {
-                x: 10px;
-                y: 6px;
-                text: "RÉAGIR AVEC…";
-            }
-            for emoji[i] in root.reaction-emojis: EmojiButton {
-                x: 10px + Math.mod(i, 8) * 34px;
-                y: 30px + Math.floor(i / 8) * 34px;
-                size: 34px;
-                emoji: emoji;
-                clicked => {
-                    reaction-popup.close();
-                    ChatData.toggle-reaction(ChatData.actions-index, emoji);
-                }
-            }
-            HorizontalLayout {
-                x: 10px;
-                y: 30px + 6 * 34px + 8px;
-                width: parent.width - 20px;
-                height: 32px;
-                spacing: 6px;
-                LineEdit {
-                    text <=> root.other-emoji;
-                    placeholder-text: "Autre émoji (Win + .)";
-                    horizontal-stretch: 1;
-                    accepted(value) => {
-                        if value != "" {
-                            reaction-popup.close();
-                            ChatData.toggle-reaction(ChatData.actions-index, value);
-                            root.other-emoji = "";
-                        }
-                    }
-                }
-                Button {
-                    text: "Réagir";
-                    clicked => {
-                        if root.other-emoji != "" {
-                            reaction-popup.close();
-                            ChatData.toggle-reaction(ChatData.actions-index, root.other-emoji);
-                            root.other-emoji = "";
-                        }
-                    }
-                }
+        EmojiPicker {
+            picked(cell) => {
+                reaction-popup.close();
+                ChatData.emoji-picked(cell, true);
             }
         }
     }

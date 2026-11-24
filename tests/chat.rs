@@ -339,6 +339,85 @@ fn profiles_reach_paired_devices_and_group_members() {
     }
 }
 
+/// Émojis personnalisés : ceux de B arrivent chez A (associé) et chez C (membre d'un groupe), image
+/// comprise ; « :nom: » devient un jeton à l'envoi, utilisable en réaction ; un émoji retiré disparaît.
+#[test]
+fn custom_emojis_reach_contacts() {
+    let nodes = start_nodes("emojis", 3);
+    let (a, b, c) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine);
+    trust(a, b);
+    trust(a, c);
+    trust(b, a);
+    trust(c, a);
+    let group = a.create_group("Émojis", &[id_of(b), id_of(c)]).unwrap();
+    wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
+
+    let source = nodes[1].dir.join("Pouce Vert.png");
+    image::RgbaImage::from_pixel(300, 200, image::Rgba([30, 200, 90, 255])).save(&source).unwrap();
+    let added = b.add_custom_emoji(&source, None).unwrap();
+    assert_eq!(added.name, "Pouce_Vert");
+    assert!(b.add_custom_emoji(&source, None).is_err(), "même image : refusée");
+    for (engine, name) in [(a, "A"), (c, "C")] {
+        wait_for(&format!("{name} reçoit l'émoji de B"), Duration::from_secs(20), || {
+            engine.custom_emoji(&added.id).is_some_and(|e| e.path.is_file() && !e.mine)
+        });
+    }
+    let seen = c.custom_emoji(&added.id).unwrap();
+    let decoded = image::open(&seen.path).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (96, 96));
+
+    // « :Pouce_Vert: » tapé par A devient le jeton ; la réaction aussi.
+    a.send_chat(&group, "Bravo :Pouce_Vert: !", None, &[]).unwrap();
+    let message = a.messages(&group, 200).into_iter().find(|m| m.text.contains("Bravo")).unwrap();
+    assert_eq!(message.text, format!("Bravo {} !", added.token()));
+    wait_for("C reçoit le message", Duration::from_secs(15), || c.messages(&group, 200).iter().any(|m| m.id == message.id));
+    c.toggle_reaction(&group, &message.id, &added.token()).unwrap();
+    wait_for("A voit la réaction", Duration::from_secs(15), || {
+        a.messages(&group, 200).iter().any(|m| m.id == message.id && m.reactions.iter().any(|r| r.emoji == added.token()))
+    });
+
+    // Retiré par B : A ne l'a plus.
+    b.remove_custom_emoji(&added.id).unwrap();
+    wait_for("A ne l'a plus", Duration::from_secs(20), || a.custom_emoji(&added.id).is_none());
+    for node in &nodes {
+        node.engine.shutdown();
+    }
+}
+
+/// Présence : « ne pas déranger » et « invisible » (vu hors ligne) arrivent chez l'autre ; un
+/// message reçu prépare une notification, avec la mention.
+#[test]
+fn presence_and_notifications() {
+    use magicplus_core::Presence;
+    let nodes = start_nodes("presence", 2);
+    let (a, b) = (&nodes[0].engine, &nodes[1].engine);
+    trust(a, b);
+    trust(b, a);
+    let presence_of = |engine: &Engine, id: &str| engine.snapshot().peers.into_iter().find(|p| p.id == id).map(|p| p.presence);
+
+    b.set_presence(Presence::Dnd).unwrap();
+    wait_for("A voit B en « ne pas déranger »", Duration::from_secs(10), || presence_of(a, &id_of(b)) == Some(Presence::Dnd));
+    b.set_presence(Presence::Invisible).unwrap();
+    wait_for("A voit B hors ligne", Duration::from_secs(10), || presence_of(a, &id_of(b)) == Some(Presence::Offline));
+    // Invisible mais joignable : les messages passent.
+    let direct = b.open_direct(&id_of(a)).unwrap();
+    let _ = a.take_notifications();
+    let my_name = a.snapshot().identity.name;
+    b.send_chat(&direct, &format!("coucou @{my_name} !"), None, &[]).unwrap();
+    let mut notes = Vec::new();
+    wait_for("A reçoit une notification", Duration::from_secs(15), || {
+        notes.extend(a.take_notifications());
+        !notes.is_empty()
+    });
+    assert_eq!(notes[0].conversation, direct);
+    assert!(notes[0].group.is_empty());
+    assert!(notes[0].mention);
+    assert!(notes[0].text.contains("coucou"));
+    for node in &nodes {
+        node.engine.shutdown();
+    }
+}
+
 /// Canevas : créé par A, écrit en même temps par B et C (jamais associés entre eux), même texte
 /// partout, arrivée rapide des frappes, historique et restauration.
 #[test]

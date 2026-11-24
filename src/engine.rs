@@ -83,6 +83,7 @@ impl Config {
 
 pub(crate) struct Discovered {
     pub device: DeviceInfo,
+    pub presence: crate::presence::Presence,
     pub fingerprint: String,
     pub ip: IpAddr,
     pub tcp_port: u16,
@@ -137,6 +138,8 @@ pub struct PeerView {
     pub fingerprint: String,
     pub trusted: bool,
     pub online: bool,
+    /// Présence annoncée (`Offline` s'il n'est pas joignable ou invisible).
+    pub presence: crate::presence::Presence,
     /// Un appareil associé annonce maintenant une autre clé : possible usurpation.
     pub key_changed: bool,
     /// Cet appareil a essayé de nous envoyer quelque chose mais nous ne l'avons pas associé.
@@ -281,6 +284,8 @@ pub(crate) struct Inner {
     pub manual_resolved: Mutex<HashMap<String, Vec<SocketAddr>>>,
     /// Appareils entendus avec un autre protocole (autre version de MagicPlus).
     pub other_versions: Mutex<HashMap<String, OtherVersion>>,
+    /// Nouveaux messages pas encore signalés par l'interface.
+    pub notifications: Mutex<Vec<crate::presence::NotificationView>>,
     /// Mises à jour publiées sur GitHub (recherche, téléchargement).
     pub update: Mutex<crate::update::UpdateStatus>,
     /// Profils : le nôtre et ceux des contacts.
@@ -366,6 +371,7 @@ impl Engine {
                 refused: Mutex::default(),
                 manual_resolved: Mutex::default(),
                 other_versions: Mutex::default(),
+                notifications: Mutex::default(),
                 update: Mutex::default(),
                 profiles: Mutex::new(profiles),
                 canvases: Mutex::new(canvases),
@@ -447,6 +453,7 @@ impl Engine {
                     fingerprint: peer.fingerprint.clone(),
                     trusted: same_key,
                     online: peer.last_seen.elapsed() < ONLINE_WINDOW,
+                    presence: if peer.last_seen.elapsed() < ONLINE_WINDOW { peer.presence } else { crate::presence::Presence::Offline },
                     key_changed: trusted_entry.is_some() && !same_key,
                     wants_pairing: !same_key && wants_pairing(id),
                 });
@@ -465,6 +472,7 @@ impl Engine {
                         fingerprint: crypto::fingerprint(&entry.public_key),
                         trusted: true,
                         online: false,
+                        presence: crate::presence::Presence::Offline,
                         key_changed: false,
                         wants_pairing: false,
                     });
@@ -846,6 +854,7 @@ impl Inner {
             discovery_port: self.cfg.discovery_port,
             reply,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
+            presence: crate::presence::effective(&lock(&self.settings), crate::presence::system_idle()).announced(),
         }
     }
 
@@ -909,6 +918,7 @@ impl Inner {
         }
 
         let fingerprint = crypto::fingerprint(&hello.device.public_key);
+        let presence = hello.presence;
         let mut device = hello.device;
         device.name = device.name.chars().filter(|c| !c.is_control()).take(60).collect();
         let name = device.name.clone();
@@ -939,10 +949,14 @@ impl Inner {
 
         let mut peers = lock(&self.peers);
         let announce = peers.get(&id).is_none_or(|known| known.last_seen.elapsed() > ONLINE_WINDOW);
+        if peers.get(&id).is_some_and(|known| known.presence != presence) {
+            self.touch();
+        }
         peers.insert(
             id,
             Discovered {
                 device,
+                presence,
                 fingerprint,
                 ip: source,
                 tcp_port: hello.tcp_port,
@@ -1085,6 +1099,7 @@ impl Inner {
                 self.set_status(format!("{name} veut vous envoyer quelque chose : associez-le dans la page Appareils"));
             }
             write_ack(&mut channel, &Ack::refused("cet appareil ne vous a pas encore associé", "not-paired"));
+            close_gracefully(channel.get_ref());
             return;
         };
 
@@ -1122,7 +1137,7 @@ impl Inner {
             self.suspend_incoming(&id, "interrompu — reprise automatique quand l'expéditeur revient");
         }
         write_ack(&mut channel, &failure.unwrap_or_else(Ack::ok));
-        let _ = channel.get_ref().shutdown(std::net::Shutdown::Both);
+        close_gracefully(channel.get_ref());
     }
 
     fn handle_message(&self, sender: &SenderInfo, plain: &[u8], started: &mut Vec<String>) -> Result<Reply> {
@@ -1214,6 +1229,7 @@ impl Inner {
                 self.receive_profile(sender, profile, body)?;
                 Ok(Reply::None)
             }
+            Message::EmojiFetch { id } => Ok(Reply::Data(self.serve_emoji(sender, &id)?)),
             Message::CanvasSync { conversation, canvas, update, state } => {
                 let reply = self.receive_canvas_sync(sender, &conversation, canvas, &update, &state)?;
                 Ok(Reply::Data(reply))
@@ -1231,6 +1247,26 @@ pub(crate) fn write_ack(channel: &mut Channel, ack: &Ack) {
     if let Ok(json) = serde_json::to_vec(ack) {
         let _ = channel.send(&json);
     }
+}
+
+/// Ferme une connexion entrante sans perdre la dernière réponse envoyée. Fermer un socket qui
+/// contient encore des données non lues envoie un RST, et Windows jette alors chez l'expéditeur
+/// les données qu'il n'avait pas encore lues (notre refus, par exemple). On cesse donc d'écrire
+/// et on lit ce qui arrive encore jusqu'à ce que l'expéditeur ferme (2 s et 1 Mo au plus).
+pub(crate) fn close_gracefully(stream: &TcpStream) {
+    use std::io::Read;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    let mut reader = stream;
+    let mut buffer = [0_u8; 8192];
+    let mut drained = 0;
+    while drained < 1024 * 1024 {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(size) => drained += size,
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 pub(crate) fn read_ack(channel: &mut Channel) -> Option<Ack> {

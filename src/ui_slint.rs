@@ -3,6 +3,7 @@
 
 mod canvas;
 mod chat;
+mod emoji;
 mod images;
 mod markdown;
 mod profile;
@@ -159,6 +160,124 @@ fn refresh_my_profile(ui: &AppWindow, engine: &Engine, first: bool) {
     }
 }
 
+/// Minutes d'inactivité proposées (index du choix dans les paramètres).
+const AUTO_IDLE_CHOICES: [u32; 5] = [0, 5, 10, 15, 30];
+
+fn load_notification_settings(ui: &AppWindow, settings: &magicplus_core::store::Settings) {
+    use magicplus_core::GroupNotifications;
+    let prefs = &settings.notifications;
+    ui.set_notif_enabled(prefs.enabled);
+    ui.set_notif_direct(prefs.direct);
+    ui.set_notif_groups(match prefs.groups {
+        GroupNotifications::All => 0,
+        GroupNotifications::Mentions => 1,
+        GroupNotifications::Never => 2,
+    });
+    ui.set_notif_preview(prefs.preview);
+    ui.set_notif_sound(prefs.sound);
+    ui.set_notif_when_focused(prefs.when_focused);
+    let index = AUTO_IDLE_CHOICES.iter().position(|m| *m == settings.auto_idle_minutes).unwrap_or(2);
+    ui.set_auto_idle_index(index as i32);
+}
+
+/// Ma présence dans le panneau « moi » (seulement si elle a changé).
+fn refresh_presence(ui: &AppWindow, engine: &Engine) {
+    let presence = engine.presence();
+    let chosen = engine.snapshot().settings.presence;
+    let label = if presence != chosen && presence == magicplus_core::Presence::Idle {
+        "Inactif (absent)".to_string()
+    } else {
+        presence.label().to_string()
+    };
+    let code = if presence == magicplus_core::Presence::Invisible { 0 } else { presence.code() };
+    if ui.get_my_presence() != code {
+        ui.set_my_presence(code);
+    }
+    if ui.get_my_presence_label() != label.as_str() {
+        ui.set_my_presence_label(label.into());
+    }
+}
+
+/// MagicPlus est-il l'application au premier plan ?
+fn app_in_foreground() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetForegroundWindow() -> isize;
+            fn GetWindowThreadProcessId(window: isize, process: *mut u32) -> u32;
+        }
+        // SAFETY : appels sans effet de bord ; `process` pointe sur une variable locale.
+        unsafe {
+            let window = GetForegroundWindow();
+            let mut process = 0_u32;
+            GetWindowThreadProcessId(window, &mut process);
+            window != 0 && process == std::process::id()
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+fn rgb(value: u32) -> slint::Color {
+    slint::Color::from_rgb_u8((value >> 16) as u8, (value >> 8) as u8, value as u8)
+}
+
+/// Applique un thème (couleurs Windows ou palette personnalisée) et coche sa pastille.
+fn apply_theme(ui: &AppWindow, def: &crate::themes::ThemeDef) {
+    let theme = ui.global::<Theme>();
+    match def.palette {
+        Some(p) => {
+            theme.set_colors(ThemeColors {
+                dark: p.dark,
+                window: rgb(p.window),
+                nav: rgb(p.nav),
+                list: rgb(p.list),
+                chat: rgb(p.chat),
+                card: rgb(p.card),
+                border: rgb(p.border),
+                soft: rgb(p.soft),
+                text: rgb(p.text),
+                subtle: rgb(p.subtle),
+                accent: rgb(p.accent),
+            });
+            theme.set_custom(true);
+            ui.invoke_apply_theme(p.dark);
+        }
+        None => {
+            theme.set_custom(false);
+            match def.platform_dark {
+                Some(dark) => ui.invoke_apply_theme(dark),
+                None => ui.invoke_follow_system_theme(),
+            }
+        }
+    }
+    let choices: Vec<ThemeChoice> = crate::themes::THEMES
+        .iter()
+        .map(|t| {
+            // Aperçu : (fond, panneau, accent, texte).
+            let (background, panel, accent, text) = match (t.palette, t.platform_dark) {
+                (Some(p), _) => (p.chat, p.nav, p.accent, p.text),
+                (None, Some(true)) => (0x272727, 0x1b1b1b, 0x60cdff, 0xffffff),
+                (None, Some(false)) => (0xfcfcfc, 0xececec, 0x0067c0, 0x1a1a1a),
+                (None, None) => (0xfcfcfc, 0x1b1b1b, 0x0067c0, 0x1a1a1a),
+            };
+            ThemeChoice {
+                id: t.id.into(),
+                name: t.name.into(),
+                background: rgb(background),
+                panel: rgb(panel),
+                accent: rgb(accent),
+                text: rgb(text),
+                selected: t.id == def.id,
+            }
+        })
+        .collect();
+    ui.set_themes(ModelRc::new(VecModel::from(choices)));
+}
+
 fn choose_profile_image(engine: &Engine, kind: magicplus_core::ProfileImage) {
     let title = match kind {
         magicplus_core::ProfileImage::Avatar => "Photo de profil",
@@ -166,13 +285,16 @@ fn choose_profile_image(engine: &Engine, kind: magicplus_core::ProfileImage) {
     };
     let picked = rfd::FileDialog::new()
         .set_title(title)
-        .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+        .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
         .pick_file();
     if let Some(path) = picked {
-        match engine.set_profile_image(kind, &path) {
+        // Une animation peut demander quelques secondes de réencodage : hors du fil de l'interface.
+        engine.set_status("Préparation de l'image…");
+        let engine = engine.clone();
+        thread::spawn(move || match engine.set_profile_image(kind, &path) {
             Ok(()) => engine.set_status("Profil mis à jour : il sera envoyé à vos contacts"),
             Err(error) => engine.set_status(format!("Image refusée : {error}")),
-        }
+        });
     }
 }
 
@@ -185,9 +307,9 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     ui.set_hotkey_paste(paste_label.into());
 
     let initial = engine.snapshot();
-    if let Some(dark) = initial.settings.dark_mode {
-        ui.invoke_apply_theme(dark);
-    }
+    apply_theme(&ui, crate::themes::current(initial.settings.theme.as_deref(), initial.settings.dark_mode));
+    load_notification_settings(&ui, &initial.settings);
+    let notifier = crate::notify::Notifier::new(&engine);
     refresh(&ui, &initial, true);
     ui.global::<MarkdownStyle>().set_mono(markdown::monospace_family().into());
     let chat: Rc<chat::Chat> = chat::Chat::new(engine.clone(), &ui);
@@ -408,8 +530,63 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let engine = engine.clone();
-        ui.on_theme_changed(move |dark| {
-            let _ = engine.update_settings(|settings| settings.dark_mode = Some(dark));
+        let weak = ui.as_weak();
+        ui.on_theme_picked(move |id| {
+            let Some(def) = crate::themes::THEMES.iter().find(|t| t.id == id.as_str()) else { return };
+            let _ = engine.update_settings(|settings| {
+                settings.theme = Some(def.id.to_string());
+                settings.dark_mode = def.palette.map(|p| p.dark).or(def.platform_dark);
+            });
+            if let Some(ui) = weak.upgrade() {
+                apply_theme(&ui, def);
+            }
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        ui.on_presence_picked(move |index| {
+            let Some(presence) = magicplus_core::Presence::CHOICES.get(index.max(0) as usize).copied() else { return };
+            if let Err(error) = engine.set_presence(presence) {
+                engine.set_status(error.to_string());
+            }
+            if let Some(ui) = weak.upgrade() {
+                refresh_presence(&ui, &engine);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        ui.on_notif_changed(move || {
+            use magicplus_core::GroupNotifications;
+            let Some(ui) = weak.upgrade() else { return };
+            let result = engine.update_settings(|settings| {
+                let prefs = &mut settings.notifications;
+                prefs.enabled = ui.get_notif_enabled();
+                prefs.direct = ui.get_notif_direct();
+                prefs.groups = match ui.get_notif_groups() {
+                    1 => GroupNotifications::Mentions,
+                    2 => GroupNotifications::Never,
+                    _ => GroupNotifications::All,
+                };
+                prefs.preview = ui.get_notif_preview();
+                prefs.sound = ui.get_notif_sound();
+                prefs.when_focused = ui.get_notif_when_focused();
+                settings.auto_idle_minutes = AUTO_IDLE_CHOICES.get(ui.get_auto_idle_index().max(0) as usize).copied().unwrap_or(10);
+            });
+            if let Err(error) = result {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let notifier = notifier.clone();
+        ui.on_notif_test(move || {
+            let sound = engine.snapshot().settings.notifications.sound;
+            notifier.show("MagicPlus", "Les notifications fonctionnent 🎉", sound, "");
         });
     }
 
@@ -423,9 +600,25 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         let engine = engine.clone();
         let weak = ui.as_weak();
         let chat = chat.clone();
+        let notifier = notifier.clone();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
             chat.tick();
             canvas.tick();
+            if let Some(ui) = weak.upgrade() {
+                refresh_presence(&ui, &engine);
+                // Nouveaux messages → notifications du système (pas pour la discussion lue à l'écran).
+                let focused = (app_in_foreground() && ui.get_page() == chat::CHAT_PAGE).then(|| chat.shown_conversation()).flatten();
+                notifier.deliver(&engine, focused.as_deref());
+                // Clic sur une notification : MagicPlus revient, sur la conversation.
+                if let Some(conversation) = notifier.take_clicked() {
+                    let _ = ui.show();
+                    ui.window().set_minimized(false);
+                    if !conversation.is_empty() {
+                        ui.set_page(chat::CHAT_PAGE);
+                        chat.open_conversation(&conversation);
+                    }
+                }
+            }
             let profiles = engine.profiles_revision();
             if profiles != profiles_seen.get() {
                 profiles_seen.set(profiles);
@@ -445,7 +638,7 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Animation des GIF des discussions : 20 images par seconde, seulement quand il y en a à l'écran.
+    // Animation des GIF des discussions et des photos de profil animées : 20 images par seconde.
     let gif_timer = slint::Timer::default();
     {
         let weak = ui.as_weak();
@@ -455,6 +648,11 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
                 if ui.get_page() == chat::CHAT_PAGE && chat.animating() {
                     let data = ui.global::<ChatData>();
                     data.set_tick(data.get_tick().wrapping_add(1));
+                }
+                // Photos et bannières animées (cartes de profil, survol des messages).
+                if images::any_animated() {
+                    let anim = ui.global::<Anim>();
+                    anim.set_tick(anim.get_tick().wrapping_add(1));
                 }
             }
         });
@@ -496,6 +694,48 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
                     data.set_actions_y(260.0);
                     data.set_actions_request(data.get_actions_request() + 1);
                 }
+            })),
+            ("emojis", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                data.set_emoji_tab(0);
+                data.invoke_emoji_filter_changed();
+                data.set_emoji_request(data.get_emoji_request() + 1);
+            })),
+            ("statut", Box::new(|ui, _| {
+                ui.set_page(0);
+                ui.set_presence_request(ui.get_presence_request() + 1);
+            })),
+            ("gifs", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                data.set_gif_request(data.get_gif_request() + 1);
+            })),
+            ("gifs-favoris", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                data.set_gif_tab(1);
+                data.invoke_gif_search();
+                data.set_gif_request(data.get_gif_request() + 1);
+            })),
+            ("emojis-categorie", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                data.set_emoji_tab(4);
+                data.invoke_emoji_filter_changed();
+                data.set_emoji_request(data.get_emoji_request() + 1);
+            })),
+            ("emojis-perso", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                data.set_emoji_tab(1);
+                data.invoke_emoji_filter_changed();
+                data.set_emoji_request(data.get_emoji_request() + 1);
             })),
             ("canevas", Box::new(|ui, chat| {
                 ui.set_page(chat::CHAT_PAGE);

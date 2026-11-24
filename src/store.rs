@@ -41,6 +41,15 @@ pub struct Settings {
     /// Mettre automatiquement le texte reçu dans le presse-papiers.
     pub auto_copy_received: bool,
     pub dark_mode: Option<bool>,
+    /// Thème de couleur (`src/themes.rs`) ; `None` : d'après `dark_mode`.
+    pub theme: Option<String>,
+    /// Présence choisie (en ligne, inactif, ne pas déranger, invisible).
+    pub presence: crate::presence::Presence,
+    /// « En ligne » devient « inactif » après ce nombre de minutes sans utiliser l'ordinateur (0 : jamais).
+    pub auto_idle_minutes: u32,
+    pub notifications: crate::presence::NotificationPrefs,
+    /// Clé d'API GIPHY (recherche de GIF ; https://developers.giphy.com/dashboard/).
+    pub giphy_key: Option<String>,
     /// Adresses (IP ou nom, port facultatif) des appareils à contacter directement.
     pub manual_addresses: Vec<String>,
     /// Chercher seul les nouvelles versions sur GitHub (seul usage d'Internet).
@@ -56,6 +65,11 @@ impl Default for Settings {
             resume_hours: 48,
             auto_copy_received: true,
             dark_mode: None,
+            theme: None,
+            giphy_key: None,
+            presence: crate::presence::Presence::Online,
+            auto_idle_minutes: 10,
+            notifications: crate::presence::NotificationPrefs::default(),
             manual_addresses: Vec::new(),
             auto_update: true,
             aliases: std::collections::BTreeMap::new(),

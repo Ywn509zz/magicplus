@@ -160,13 +160,16 @@ impl Controller {
         };
         let picked = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
             .pick_file();
         if let Some(path) = picked {
-            match self.engine().set_profile_image(kind, &path) {
-                Ok(()) => self.engine().set_status("Profil mis à jour : il sera envoyé à vos contacts"),
-                Err(error) => self.engine().set_status(format!("Image refusée : {error}")),
-            }
+            // Une animation peut demander quelques secondes de réencodage : hors du fil principal.
+            self.engine().set_status("Préparation de l'image…");
+            let engine = self.engine().clone();
+            std::thread::spawn(move || match engine.set_profile_image(kind, &path) {
+                Ok(()) => engine.set_status("Profil mis à jour : il sera envoyé à vos contacts"),
+                Err(error) => engine.set_status(format!("Image refusée : {error}")),
+            });
         }
     }
 

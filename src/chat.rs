@@ -64,7 +64,9 @@ pub enum ConversationKind {
 pub struct MemberView {
     pub id: String,
     pub name: String,
+    /// Joignable et pas invisible.
     pub online: bool,
+    pub presence: crate::presence::Presence,
     pub me: bool,
 }
 
@@ -98,6 +100,8 @@ pub enum MessageStatus {
 #[derive(Debug, Clone)]
 pub struct ReplyView {
     pub id: String,
+    /// Auteur du message cité (vide s'il est introuvable) : photo et couleur de la réponse.
+    pub author_id: String,
     pub author_name: String,
     pub excerpt: String,
 }
@@ -265,7 +269,7 @@ fn attachment_kind(path: &Path) -> AttachmentKind {
         .unwrap_or_default();
     match extension.as_str() {
         "gif" => AttachmentKind::Gif,
-        "png" | "jpg" | "jpeg" | "heic" | "webp" | "bmp" | "tif" | "tiff" => AttachmentKind::Image,
+        "png" | "jpg" | "jpeg" | "heic" | "bmp" | "tif" | "tiff" => AttachmentKind::Image,
         "mp4" | "mov" | "m4v" | "webm" | "avi" | "mkv" => AttachmentKind::Video,
         _ => AttachmentKind::File,
     }
@@ -273,7 +277,7 @@ fn attachment_kind(path: &Path) -> AttachmentKind {
 
 /// Aperçu sur une ligne, sans la syntaxe Markdown.
 fn excerpt(text: &str) -> String {
-    let flat: String = crate::markdown::plain(text).split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat: String = crate::markdown::plain(&crate::emoji::display_text(text)).split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() > 80 {
         format!("{}…", flat.chars().take(80).collect::<String>())
     } else {
@@ -619,7 +623,7 @@ fn validate(kind: &ChatKind) -> Result<()> {
             }
         }
         ChatKind::React { target, emoji, .. } => {
-            if !valid_name(target) || emoji.is_empty() || emoji.len() > 32 {
+            if !valid_name(target) || emoji.is_empty() || emoji.len() > 64 {
                 bail!("réaction invalide");
             }
         }
@@ -731,6 +735,8 @@ impl Inner {
         }
 
         let mut last = chat.conversations[conversation_id].meta.applied.get(&sender.id).copied().unwrap_or(0);
+        // Nouveaux messages de l'expéditeur : (texte, nombre de pièces jointes), à signaler.
+        let mut fresh: Vec<(String, usize)> = Vec::new();
         let mut events = events;
         events.sort_by_key(|event| event.seq);
         for event in events {
@@ -747,11 +753,66 @@ impl Inner {
                 last = event.seq;
                 continue;
             }
+            if let ChatKind::Post { text, attachments, .. } = &event.kind {
+                fresh.push((text.clone(), attachments.len()));
+            }
             chat.record(conversation_id, &sender.id, event.clone());
             last = event.seq;
         }
         chat.typing.remove(&(conversation_id.to_string(), sender.id.clone()));
+        let group = chat
+            .conversations
+            .get(conversation_id)
+            .filter(|c| c.meta.kind == ConversationKind::Group)
+            .map(|c| if c.meta.name.is_empty() { "Groupe".to_string() } else { c.meta.name.clone() })
+            .unwrap_or_default();
+        drop(chat);
+        if !fresh.is_empty() {
+            self.queue_notifications(sender, conversation_id, group, fresh);
+        }
         Ok(last)
+    }
+
+    /// Prépare les notifications des nouveaux messages de `sender` (au plus les 3 derniers d'un
+    /// coup, plus un résumé : une longue absence ne doit pas faire pleuvoir les notifications).
+    fn queue_notifications(&self, sender: &SenderInfo, conversation: &str, group: String, fresh: Vec<(String, usize)>) {
+        let author = self.display_name(&sender.id).unwrap_or_else(|| sender.name.clone());
+        let my_names: Vec<String> = {
+            let identity = self.identity.read().unwrap_or_else(|p| p.into_inner());
+            vec![identity.name.clone(), identity.pseudo.clone()]
+        };
+        let count = fresh.len();
+        let mut notes: Vec<crate::presence::NotificationView> = fresh
+            .into_iter()
+            .skip(count.saturating_sub(3))
+            .map(|(text, files)| {
+                let shown = crate::markdown::plain(&crate::emoji::display_text(&text));
+                let shown = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+                let shown = if shown.is_empty() {
+                    format!("📎 {files} pièce(s) jointe(s)")
+                } else if shown.chars().count() > 140 {
+                    format!("{}…", shown.chars().take(140).collect::<String>())
+                } else {
+                    shown
+                };
+                crate::presence::NotificationView {
+                    conversation: conversation.to_string(),
+                    group: group.clone(),
+                    author: author.clone(),
+                    mention: crate::presence::mentions(&text, &my_names),
+                    text: shown,
+                }
+            })
+            .collect();
+        if count > 3 {
+            if let Some(first) = notes.first_mut() {
+                first.text = format!("{} nouveaux messages · {}", count, first.text);
+            }
+        }
+        let mut queue = lock(&self.notifications);
+        queue.extend(notes);
+        let excess = queue.len().saturating_sub(20);
+        queue.drain(..excess);
     }
 
     pub(crate) fn receive_chat_typing(&self, sender: &SenderInfo, conversation_id: &str) -> Result<()> {
@@ -1106,7 +1167,9 @@ impl Engine {
         forced_kind: Option<AttachmentKind>,
         forwarded: Option<String>,
     ) -> Result<()> {
-        let text = text.trim_end();
+        // « :nom: » d'un émoji personnalisé connu → « <:nom:id> ».
+        let encoded = crate::emoji::encode_shortcodes(text, &self.custom_emojis());
+        let text = encoded.trim_end();
         if text.trim().is_empty() && files.is_empty() {
             bail!("message vide");
         }
@@ -1174,7 +1237,8 @@ impl Engine {
     }
 
     pub fn edit_chat(&self, conversation: &str, message: &str, text: &str) -> Result<()> {
-        let text = text.trim_end();
+        let encoded = crate::emoji::encode_shortcodes(text, &self.custom_emojis());
+        let text = encoded.trim_end();
         if text.trim().is_empty() {
             bail!("message vide");
         }
@@ -1265,11 +1329,13 @@ impl Engine {
     }
 
     pub fn conversations(&self) -> Vec<ConversationView> {
-        let online: HashSet<String> = lock(&self.inner.peers)
+        // Présence de chacun (les invisibles et les absents : hors ligne).
+        let presences: HashMap<String, crate::presence::Presence> = lock(&self.inner.peers)
             .iter()
             .filter(|(_, peer)| peer.last_seen.elapsed() < ONLINE_WINDOW)
-            .map(|(id, _)| id.clone())
+            .map(|(id, peer)| (id.clone(), peer.presence))
             .collect();
+        let my_presence = self.presence();
         let display = self.inner.display_names();
         let chat = lock(&self.inner.chat);
         let me = chat.me.clone();
@@ -1318,7 +1384,20 @@ impl Engine {
                     members: meta
                         .members
                         .iter()
-                        .map(|m| MemberView { id: m.id.clone(), name: name_of(&m.id), online: m.id == me || online.contains(&m.id), me: m.id == me })
+                        .map(|m| {
+                            let presence = if m.id == me {
+                                my_presence
+                            } else {
+                                presences.get(&m.id).copied().unwrap_or(crate::presence::Presence::Offline)
+                            };
+                            MemberView {
+                                id: m.id.clone(),
+                                name: name_of(&m.id),
+                                online: m.id == me || (presences.contains_key(&m.id) && presence != crate::presence::Presence::Offline),
+                                presence,
+                                me: m.id == me,
+                            }
+                        })
                         .collect(),
                     unread,
                     last_preview,
@@ -1379,6 +1458,7 @@ impl Engine {
                     let original = state.messages.iter().find(|o| &o.id == target);
                     ReplyView {
                         id: target.clone(),
+                        author_id: original.map(|o| o.author.clone()).unwrap_or_default(),
                         author_name: original.map(|o| name_of(&o.author)).unwrap_or_default(),
                         excerpt: original
                             .map(|o| if o.deleted { "Message supprimé".to_string() } else { excerpt(&o.text) })
@@ -1436,7 +1516,7 @@ impl Engine {
                     status,
                     lamport: m.lamport,
                     forwarded: m.forwarded.clone(),
-                    pinned_by: m.pinned.as_deref().map(&name_of),
+                    pinned_by: m.pinned.as_deref().map(name_of),
                 }
             })
             .collect()
