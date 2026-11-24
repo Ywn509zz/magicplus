@@ -237,6 +237,15 @@ impl Chat {
         data.set_profile_request(data.get_profile_request() + 1);
     }
 
+    /// Profil en grand.
+    pub fn show_full_profile(&self, id: &str) {
+        let Some(ui) = self.ui() else { return };
+        let Some(details) = self.engine.profile_details(id) else { return };
+        let data = ui.global::<ChatData>();
+        data.set_full(super::profile::full_item(&details));
+        data.set_full_open(true);
+    }
+
     fn ui(&self) -> Option<AppWindow> {
         self.weak.upgrade()
     }
@@ -1259,6 +1268,43 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
         if let Some(ui) = chat.ui() {
             ui.set_page(3);
         }
+    });
+    on!(on_open_full_profile, |chat, id| chat.show_full_profile(&id));
+    on!(on_full_action, |chat, action| {
+        let Some(ui) = chat.ui() else { return };
+        let data = ui.global::<ChatData>();
+        let id = data.get_full().profile.id.to_string();
+        match action {
+            1 => {
+                data.set_full_open(false);
+                chat.chat_with(&id);
+            }
+            2 => {
+                let group = chat.engine.profile_details(&id).and_then(|d| d.groups.first().map(|(g, _)| g.clone()));
+                if let Some(group) = group {
+                    if let Err(error) = chat.engine.send_friend_request(&group, &id) {
+                        chat.status(error.to_string());
+                    }
+                }
+                chat.show_full_profile(&id);
+            }
+            3 => {
+                if let Err(error) = chat.engine.answer_friend_request(&id, true) {
+                    chat.status(error.to_string());
+                }
+                chat.show_full_profile(&id);
+            }
+            _ => {
+                data.set_full_open(false);
+                ui.set_page(3);
+            }
+        }
+    });
+    on!(on_open_group, |chat, id| {
+        let Some(ui) = chat.ui() else { return };
+        ui.global::<ChatData>().set_full_open(false);
+        ui.set_page(CHAT_PAGE);
+        chat.open_conversation(&id);
     });
 }
 

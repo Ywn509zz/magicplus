@@ -142,6 +142,38 @@ impl Controller {
         }
         #[allow(deprecated)]
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        self.maybe_show_whats_new();
+    }
+
+    /// Nouveautés après une mise à jour (une seule fois).
+    pub(super) fn maybe_show_whats_new(&self) {
+        let engine = self.engine();
+        let Some(news) = engine.whats_new() else { return };
+        engine.dismiss_whats_new();
+        self.show_release_notes(&format!("MagicPlus est passé en version {}", news.to), &news.notes);
+    }
+
+    /// Fenêtre avec les nouveautés (Markdown), défilante.
+    pub(super) fn show_release_notes(&self, title: &str, notes: &str) {
+        let mtm = self.mtm();
+        let width = 460.0;
+        let text = super::markdown_view::markdown_view(notes, 13.0, width - 20.0, mtm);
+        text.layoutSubtreeIfNeeded();
+        let height = text.fittingSize().height;
+        let document = FlippedView::new(mtm);
+        document.setFrameSize(NSSize::new(width - 20.0, height));
+        document.addSubview(&text);
+        text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width - 20.0, height)));
+        let scroll = NSScrollView::new(mtm);
+        scroll.setHasVerticalScroller(true);
+        scroll.setDrawsBackground(false);
+        scroll.setDocumentView(Some(&document));
+        scroll.setFrameSize(NSSize::new(width, height.clamp(120.0, 360.0)));
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&ns(title));
+        alert.setAccessoryView(Some(&scroll));
+        alert.addButtonWithTitle(&ns("Super !"));
+        alert.runModal();
     }
 
     /// Toutes les 150 ms : notifications à afficher et clics reçus.

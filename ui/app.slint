@@ -1,16 +1,16 @@
 // Interface MagicPlus, dans l'esprit de Windows 11 (Fluent) :
 // navigation à gauche, fond « Mica », cartes arrondies, thème clair ou sombre.
 
-import { Button, Switch, LineEdit, ComboBox, CheckBox, ProgressIndicator, ScrollView, TextEdit, Palette } from "std-widgets.slint";
+import { Button, Switch, LineEdit, ComboBox, CheckBox, ProgressIndicator, ScrollView, TextEdit, Palette, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem } from "chat.slint";
 
-import { MarkdownStyle, BlockItem, TableRowItem, TableCellItem } from "markdown.slint";
-import { ProfileCard, ProfileItem } from "profile.slint";
+import { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, MarkdownView } from "markdown.slint";
+import { ProfileCard, ProfileItem, FullProfileView, FullProfileItem, GroupLink } from "profile.slint";
 import { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult } from "canvas.slint";
 
 export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem }
-export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem }
+export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem, FullProfileItem, GroupLink }
 export { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult }
 
 export struct PeerItem {
@@ -204,6 +204,7 @@ component PeerCard inherits Card {
     callback forget(string);
     callback chat(string);
     callback alias(PeerItem);
+    callback profile(string);
 
     HorizontalLayout {
         spacing: 14px;
@@ -252,6 +253,12 @@ component PeerCard inherits Card {
             alignment: center;
             if root.peer.trusted: HorizontalLayout {
                 spacing: 8px;
+                Button {
+                    text: "Profil";
+                    clicked => {
+                        root.profile(root.peer.id);
+                    }
+                }
                 Button {
                     text: "Surnom…";
                     clicked => {
@@ -344,8 +351,8 @@ export component AppWindow inherits Window {
     icon: @image-url("icons/shield.svg");
     preferred-width: 1040px;
     preferred-height: 700px;
-    min-width: 820px;
-    min-height: 560px;
+    min-width: 660px;
+    min-height: 460px;
     background: Theme.mica;
     default-font-size: 14px;
 
@@ -377,6 +384,18 @@ export component AppWindow inherits Window {
     in property <bool> update-has-page;
     in property <bool> update-pending;
     in-out property <bool> update-auto: true;
+    // Recadrage d'une photo ou d'une bannière.
+    in-out property <bool> crop-open;
+    in property <bool> crop-banner;
+    in property <image> crop-preview;
+    in property <bool> crop-animated;
+    in-out property <float> crop-zoom: 1;
+    in-out property <float> crop-x: 0.5;
+    in-out property <float> crop-y: 0.5;
+    // Nouveautés (après une mise à jour, ou à la demande).
+    in-out property <bool> news-open;
+    in property <string> news-title;
+    in property <[BlockItem]> news-blocks;
     // Démarrage avec la session, notifications du système.
     in-out property <bool> launch-at-login;
     in-out property <bool> notifications-on: true;
@@ -433,6 +452,9 @@ export component AppWindow inherits Window {
     callback set-alias(string, string);
     callback update-auto-changed(bool);
     callback launch-at-login-changed(bool);
+    callback crop-changed();
+    callback crop-apply();
+    callback show-news();
     callback notifications-changed(bool);
     // Demande d'ami : 1 accepter, 0 refuser, -1 retirer la nôtre.
     callback friend-answer(string, int);
@@ -748,6 +770,9 @@ export component AppWindow inherits Window {
                                 }
                                 chat(id) => {
                                     root.chat-with(id);
+                                }
+                                profile(id) => {
+                                    ChatData.open-full-profile(id);
                                 }
                                 alias(p) => {
                                     root.alias-peer = p;
@@ -1385,6 +1410,12 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     Button {
+                                        text: "Voir les nouveautés";
+                                        clicked => {
+                                            root.show-news();
+                                        }
+                                    }
+                                    Button {
                                         text: "Rechercher maintenant";
                                         enabled: !root.update-busy;
                                         clicked => {
@@ -1557,6 +1588,155 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.alias-open = false;
                         root.set-alias(root.alias-peer.id, root.alias-edit);
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ profil en grand
+    if ChatData.full-open: Rectangle {
+        background: #000000aa;
+        TouchArea {
+            clicked => {
+                ChatData.full-open = false;
+            }
+        }
+        full-scroll := ScrollView {
+            width: min(560px, parent.width - 32px);
+            height: min(full-view.preferred-height, parent.height - 32px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            content-height: full-view.preferred-height;
+            full-view := FullProfileView {
+                width: full-scroll.visible-width;
+                item: ChatData.full;
+                action(code) => {
+                    ChatData.full-action(code);
+                }
+                open-group(id) => {
+                    ChatData.open-group(id);
+                }
+                link-clicked(url) => {
+                    ChatData.open-link(url);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ recadrage
+    if root.crop-open: Rectangle {
+        background: #00000099;
+        TouchArea { }
+        Card {
+            width: min(500px, parent.width - 32px);
+            height: self.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.dark ? #2d2d2d : #ffffff;
+            Text {
+                text: root.crop-banner ? "Recadrer la bannière" : "Recadrer la photo de profil";
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+            }
+            Subtle {
+                text: "Réglez le zoom et la partie de l'image à garder. Elle n'est jamais étirée." + (root.crop-animated ? " Le GIF restera animé (aperçu de la première image)." : "");
+            }
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: root.crop-banner ? 420px : 220px;
+                    height: root.crop-banner ? 168px : 220px;
+                    border-radius: root.crop-banner ? 8px : 110px;
+                    clip: true;
+                    Image {
+                        source: root.crop-preview;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: fill;
+                    }
+                }
+            }
+            for row in [{ name: "Zoom", index: 0 }, { name: "Gauche ↔ droite", index: 1 }, { name: "Haut ↔ bas", index: 2 }]: HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: row.name;
+                    color: Theme.text;
+                    width: 120px;
+                    vertical-alignment: center;
+                }
+                Slider {
+                    minimum: row.index == 0 ? 1 : 0;
+                    maximum: row.index == 0 ? 4 : 1;
+                    value: row.index == 0 ? root.crop-zoom : row.index == 1 ? root.crop-x : root.crop-y;
+                    changed(value) => {
+                        if row.index == 0 {
+                            root.crop-zoom = value;
+                        } else if row.index == 1 {
+                            root.crop-x = value;
+                        } else {
+                            root.crop-y = value;
+                        }
+                        root.crop-changed();
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Annuler";
+                    clicked => {
+                        root.crop-open = false;
+                    }
+                }
+                Button {
+                    text: "Enregistrer";
+                    primary: true;
+                    clicked => {
+                        root.crop-open = false;
+                        root.crop-apply();
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ nouveautés
+    if root.news-open: Rectangle {
+        background: #00000099;
+        TouchArea { }
+        Card {
+            width: min(520px, parent.width - 32px);
+            height: min(self.preferred-height, parent.height - 32px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.dark ? #2d2d2d : #ffffff;
+            Text {
+                text: root.news-title;
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            news-scroll := ScrollView {
+                min-height: 120px;
+                preferred-height: min(news-view.preferred-height, 380px);
+                content-height: news-view.preferred-height;
+                news-view := MarkdownView {
+                    width: news-scroll.visible-width - 12px;
+                    blocks: root.news-blocks;
+                    font-size: 13px;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Super !";
+                    primary: true;
+                    clicked => {
+                        root.news-open = false;
                     }
                 }
             }

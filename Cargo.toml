@@ -1,6 +1,6 @@
 [package]
 name = "magicplus"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 description = "MagicPlus : presse-papiers et transfert de fichiers chiffrés entre machines du réseau local."
 build = "build.rs"

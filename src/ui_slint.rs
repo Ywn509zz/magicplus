@@ -201,7 +201,17 @@ fn refresh_my_profile(ui: &AppWindow, engine: &Engine, first: bool) {
     }
 }
 
-fn choose_profile_image(engine: &Engine, kind: magicplus_core::ProfileImage) {
+/// Image en cours de recadrage.
+struct Cropping {
+    source: magicplus_core::CropSource,
+    kind: magicplus_core::ProfileImage,
+    path: std::path::PathBuf,
+}
+
+type CropState = Rc<std::cell::RefCell<Option<Cropping>>>;
+
+/// Choix d'une image, puis fenêtre de recadrage (zoom, position).
+fn choose_profile_image(ui: &AppWindow, engine: &Engine, state: &CropState, kind: magicplus_core::ProfileImage) {
     let title = match kind {
         magicplus_core::ProfileImage::Avatar => "Photo de profil",
         magicplus_core::ProfileImage::Banner => "Bannière du profil",
@@ -210,12 +220,33 @@ fn choose_profile_image(engine: &Engine, kind: magicplus_core::ProfileImage) {
         .set_title(title)
         .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
         .pick_file();
-    if let Some(path) = picked {
-        match engine.set_profile_image(kind, &path) {
-            Ok(()) => engine.set_status("Profil mis à jour : il sera envoyé à vos contacts"),
-            Err(error) => engine.set_status(format!("Image refusée : {error}")),
+    let Some(path) = picked else { return };
+    match magicplus_core::CropSource::open(&path) {
+        Ok(source) => {
+            ui.set_crop_animated(source.animated);
+            ui.set_crop_banner(kind == magicplus_core::ProfileImage::Banner);
+            ui.set_crop_zoom(1.0);
+            ui.set_crop_x(0.5);
+            ui.set_crop_y(0.5);
+            *state.borrow_mut() = Some(Cropping { source, kind, path });
+            crop_preview(ui, state);
+            ui.set_crop_open(true);
         }
+        Err(error) => engine.set_status(format!("Image refusée : {error}")),
     }
+}
+
+fn crop_of(ui: &AppWindow) -> magicplus_core::Crop {
+    magicplus_core::Crop { zoom: ui.get_crop_zoom(), x: ui.get_crop_x(), y: ui.get_crop_y() }
+}
+
+fn crop_preview(ui: &AppWindow, state: &CropState) {
+    let state = state.borrow();
+    let Some(cropping) = state.as_ref() else { return };
+    let width = if cropping.kind == magicplus_core::ProfileImage::Banner { 840 } else { 440 };
+    let pixels = cropping.source.preview(cropping.kind, crop_of(ui), width);
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(pixels.as_raw(), pixels.width(), pixels.height());
+    ui.set_crop_preview(slint::Image::from_rgba8(buffer));
 }
 
 pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
@@ -236,13 +267,66 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     let canvas = canvas::Canvas::new(engine.clone(), chat.clone(), &ui);
     refresh_my_profile(&ui, &engine, true);
     let profiles_seen = Rc::new(std::cell::Cell::new(engine.profiles_revision()));
+    let cropping: CropState = Rc::default();
     {
         let engine = engine.clone();
-        ui.on_profile_choose_photo(move || choose_profile_image(&engine, magicplus_core::ProfileImage::Avatar));
+        let (weak, state) = (ui.as_weak(), cropping.clone());
+        ui.on_profile_choose_photo(move || {
+            if let Some(ui) = weak.upgrade() {
+                choose_profile_image(&ui, &engine, &state, magicplus_core::ProfileImage::Avatar);
+            }
+        });
     }
     {
         let engine = engine.clone();
-        ui.on_profile_choose_banner(move || choose_profile_image(&engine, magicplus_core::ProfileImage::Banner));
+        let (weak, state) = (ui.as_weak(), cropping.clone());
+        ui.on_profile_choose_banner(move || {
+            if let Some(ui) = weak.upgrade() {
+                choose_profile_image(&ui, &engine, &state, magicplus_core::ProfileImage::Banner);
+            }
+        });
+    }
+    {
+        let (weak, state) = (ui.as_weak(), cropping.clone());
+        ui.on_crop_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                crop_preview(&ui, &state);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let (weak, state) = (ui.as_weak(), cropping.clone());
+        ui.on_crop_apply(move || {
+            let (Some(ui), Some(cropping)) = (weak.upgrade(), state.borrow_mut().take()) else { return };
+            let crop = crop_of(&ui);
+            // Un GIF animé se recadre image par image : hors du fil de l'interface.
+            engine.set_status("Préparation de l'image…");
+            let engine = engine.clone();
+            thread::spawn(move || match engine.set_profile_image_cropped(cropping.kind, &cropping.path, crop) {
+                Ok(()) => engine.set_status("Profil mis à jour : il sera envoyé à vos contacts"),
+                Err(error) => engine.set_status(format!("Image refusée : {error}")),
+            });
+        });
+    }
+    // Nouveautés : après une mise à jour, puis à la demande.
+    let show_news = {
+        let weak = ui.as_weak();
+        move |title: String, notes: String| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_news_title(title.into());
+                ui.set_news_blocks(markdown::blocks(&notes));
+                ui.set_news_open(true);
+            }
+        }
+    };
+    if let Some(news) = engine.whats_new() {
+        engine.dismiss_whats_new();
+        show_news(format!("MagicPlus est passé en version {}", news.to), news.notes);
+    }
+    {
+        let engine = engine.clone();
+        ui.on_show_news(move || show_news("Nouveautés de MagicPlus".to_string(), engine.current_release_notes()));
     }
     {
         let engine = engine.clone();
@@ -625,6 +709,16 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
                 chat.select_index(1);
                 let data = ui.global::<ChatData>();
                 data.invoke_show_profile(data.get_peer_id());
+            })),
+            ("profil-complet", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(1);
+                let data = ui.global::<ChatData>();
+                data.invoke_open_full_profile(data.get_peer_id());
+            })),
+            ("nouveautes", Box::new(|ui, _| {
+                ui.global::<ChatData>().set_full_open(false);
+                ui.invoke_show_news();
             })),
             ("menu-message", Box::new(|ui, chat| {
                 ui.set_page(chat::CHAT_PAGE);

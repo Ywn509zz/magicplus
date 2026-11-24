@@ -3,6 +3,7 @@
 pub mod autostart;
 mod bluetooth;
 pub mod canvas;
+pub mod changelog;
 pub mod chat;
 pub mod crypto;
 pub mod engine;
@@ -26,8 +27,9 @@ pub use chat::{
 };
 pub use protocol::AttachmentKind;
 pub use canvas::{CanvasVersionView, CanvasView};
-pub use profile::{ProfileImage, ProfileView};
+pub use profile::{Crop, CropSource, ProfileDetails, ProfileImage, ProfileView};
 pub use update::{UpdateState, UpdateView};
+pub use changelog::WhatsNew;
 pub use firewall::FirewallState;
 pub use friends::{FriendRequestView, FriendState};
 pub use engine::{

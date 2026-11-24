@@ -7,7 +7,7 @@
 import { Button, LineEdit, CheckBox, ScrollView, TextEdit, ProgressIndicator } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { MarkdownView, BlockItem } from "markdown.slint";
-import { Avatar, ProfileCard, ProfileItem } from "profile.slint";
+import { Avatar, ProfileCard, ProfileItem, FullProfileItem, GroupLink } from "profile.slint";
 import { CanvasPane, CanvasData } from "canvas.slint";
 
 export struct ConversationItem {
@@ -141,6 +141,12 @@ export global ChatData {
     // Carte de profil à afficher (remplie par Rust avant `profile-request`).
     in property <ProfileItem> profile;
     in-out property <int> profile-request;
+    // Profil en grand.
+    in property <FullProfileItem> full;
+    in-out property <bool> full-open;
+    callback open-full-profile(string);
+    callback full-action(int);
+    callback open-group(string);
     // Animation des GIF : avance de 1 toutes les 50 ms.
     in property <int> tick;
 
@@ -1097,9 +1103,17 @@ component ConversationPane inherits Rectangle {
             link-clicked(url) => {
                 ChatData.open-link(url);
             }
-            if ChatData.profile.can-chat || ChatData.profile.me: HorizontalLayout {
+            HorizontalLayout {
                 alignment: start;
                 padding-top: 6px;
+                spacing: 8px;
+                Button {
+                    text: "Profil complet";
+                    clicked => {
+                        profile-popup.close();
+                        ChatData.open-full-profile(ChatData.profile.id);
+                    }
+                }
                 if ChatData.profile.can-chat: Button {
                     text: "Discuter";
                     primary: true;

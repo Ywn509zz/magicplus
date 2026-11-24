@@ -49,6 +49,8 @@ pub struct Settings {
     pub aliases: std::collections::BTreeMap<String, String>,
     /// Notifications du système pour les messages et demandes reçus.
     pub notifications: bool,
+    /// Version lancée la dernière fois (pour montrer les nouveautés après une mise à jour).
+    pub last_version: String,
 }
 
 impl Default for Settings {
@@ -62,6 +64,7 @@ impl Default for Settings {
             auto_update: true,
             aliases: std::collections::BTreeMap::new(),
             notifications: true,
+            last_version: String::new(),
         }
     }
 }

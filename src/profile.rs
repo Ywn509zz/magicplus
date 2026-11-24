@@ -34,6 +34,11 @@ const BANNER_SIZE: (u32, u32) = (960, 384);
 const MAX_GIF_AVATAR: usize = 1_500_000;
 const MAX_GIF_BANNER: usize = 2_400_000;
 const MAX_IMAGE_BYTES: u64 = 3 * 1024 * 1024;
+/// Image choisie avant recadrage (un GIF peut être lourd).
+const MAX_SOURCE_BYTES: u64 = 40 * 1024 * 1024;
+/// Taille d'un GIF animé recadré (plus petite : chaque image du GIF compte).
+const GIF_AVATAR_SIZE: u32 = 192;
+const GIF_BANNER_SIZE: (u32, u32) = (600, 240);
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 const RETRY_AFTER_REFUSAL: Duration = Duration::from_secs(300);
 
@@ -53,6 +58,69 @@ impl ProfileImage {
             ProfileImage::Banner => "banniere",
         }
     }
+
+    /// Largeur / hauteur de l'image enregistrée (carré, ou bannière 5:2).
+    pub fn aspect(self) -> f64 {
+        match self {
+            ProfileImage::Avatar => 1.0,
+            ProfileImage::Banner => BANNER_SIZE.0 as f64 / BANNER_SIZE.1 as f64,
+        }
+    }
+}
+
+/// Partie de l'image à garder : zoom (1 = le plus grand cadre possible) et position du cadre,
+/// de 0 (à gauche, en haut) à 1 (à droite, en bas). Jamais d'étirement : l'image est recadrée.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crop {
+    pub zoom: f32,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Default for Crop {
+    fn default() -> Self {
+        Crop { zoom: 1.0, x: 0.5, y: 0.5 }
+    }
+}
+
+/// Cadre (x, y, largeur, hauteur) à garder dans une image `width` × `height`.
+pub fn crop_rect(width: u32, height: u32, kind: ProfileImage, crop: Crop) -> (u32, u32, u32, u32) {
+    let (w, h) = (width.max(1) as f64, height.max(1) as f64);
+    let ratio = kind.aspect();
+    let (base_w, base_h) = if w / h > ratio { (h * ratio, h) } else { (w, w / ratio) };
+    let zoom = (crop.zoom as f64).clamp(1.0, 8.0);
+    let (cw, ch) = ((base_w / zoom).max(1.0).min(w), (base_h / zoom).max(1.0).min(h));
+    let x = (w - cw) * (crop.x as f64).clamp(0.0, 1.0);
+    let y = (h - ch) * (crop.y as f64).clamp(0.0, 1.0);
+    (x.round() as u32, y.round() as u32, (cw.round() as u32).max(1), (ch.round() as u32).max(1))
+}
+
+/// Image choisie, gardée en mémoire (réduite) pour l'aperçu du recadrage.
+pub struct CropSource {
+    image: image::RgbaImage,
+    /// GIF animé : il le restera après recadrage.
+    pub animated: bool,
+}
+
+impl CropSource {
+    pub fn open(path: &Path) -> Result<CropSource> {
+        let bytes = fs::read(path).with_context(|| format!("« {} » est illisible", path.display()))?;
+        if bytes.len() as u64 > MAX_SOURCE_BYTES {
+            bail!("image trop lourde (40 Mo au plus)");
+        }
+        let format = image::guess_format(&bytes).map_err(|_| anyhow!("ce fichier n'est pas une image reconnue"))?;
+        let image = image::load_from_memory(&bytes).context("image illisible")?;
+        let image = if image.width().max(image.height()) > 1400 { image.thumbnail(1400, 1400) } else { image };
+        Ok(CropSource { image: image.to_rgba8(), animated: format == image::ImageFormat::Gif })
+    }
+
+    /// Aperçu du résultat, `width` pixels de large.
+    pub fn preview(&self, kind: ProfileImage, crop: Crop, width: u32) -> image::RgbaImage {
+        let (x, y, w, h) = crop_rect(self.image.width(), self.image.height(), kind, crop);
+        let part = image::imageops::crop_imm(&self.image, x, y, w, h).to_image();
+        let height = ((width as f64) / kind.aspect()).round().max(1.0) as u32;
+        image::imageops::resize(&part, width.max(1), height, image::imageops::FilterType::Triangle)
+    }
 }
 
 /// Profil d'un appareil (le nôtre ou celui d'un contact), pour l'interface.
@@ -67,6 +135,22 @@ pub struct ProfileView {
     pub avatar: Option<PathBuf>,
     pub banner: Option<PathBuf>,
     pub me: bool,
+}
+
+/// Tout ce qu'affiche le profil en grand.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileDetails {
+    pub profile: ProfileView,
+    pub device_name: String,
+    pub pseudo: String,
+    pub platform: String,
+    pub fingerprint: String,
+    pub online: bool,
+    /// Associé (discussion à deux possible).
+    pub trusted: bool,
+    /// Groupes en commun : (conversation, nom).
+    pub groups: Vec<(String, String)>,
+    pub friend: crate::friends::FriendState,
 }
 
 pub(crate) struct ProfileStore {
@@ -171,29 +255,32 @@ impl ProfileStore {
 
 // ------------------------------------------------------------------ images
 
-/// Prépare une image choisie par l'utilisateur : recadrée au centre et réduite (photo carrée
-/// 256 px, bannière 960 × 384), sauf un GIF animé assez léger, gardé tel quel.
-fn prepare_image(source: &Path, kind: ProfileImage) -> Result<(Vec<u8>, &'static str)> {
+/// Prépare une image choisie par l'utilisateur : recadrée (cadre `crop`) puis réduite (photo carrée
+/// 256 px, bannière 960 × 384). Un GIF animé est recadré image par image et reste animé.
+fn prepare_image(source: &Path, kind: ProfileImage, crop: Crop) -> Result<(Vec<u8>, &'static str)> {
     use image::{imageops::FilterType, ImageFormat, ImageReader};
     let bytes = fs::read(source).with_context(|| format!("« {} » est illisible", source.display()))?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        bail!("image trop lourde (40 Mo au plus)");
+    }
     let reader = ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()?;
     let format = reader.format().ok_or_else(|| anyhow!("ce fichier n'est pas une image reconnue"))?;
-    let gif_limit = if kind == ProfileImage::Avatar { MAX_GIF_AVATAR } else { MAX_GIF_BANNER };
-    if format == ImageFormat::Gif && bytes.len() <= gif_limit {
-        image::load_from_memory_with_format(&bytes, ImageFormat::Gif).context("GIF illisible")?;
-        return Ok((bytes, "gif"));
+    if format == ImageFormat::Gif && is_animated_gif(&bytes) {
+        let gif = crop_gif(&bytes, kind, crop)?;
+        let limit = if kind == ProfileImage::Avatar { MAX_GIF_AVATAR } else { MAX_GIF_BANNER };
+        if gif.len() <= limit {
+            return Ok((gif, "gif"));
+        }
+        // Trop lourd même recadré : on garde la première image.
     }
     let image = reader.decode().context("image illisible")?;
     let (target_w, target_h) = match kind {
         ProfileImage::Avatar => (AVATAR_SIZE, AVATAR_SIZE),
         ProfileImage::Banner => BANNER_SIZE,
     };
-    // Recadrage au centre à la bonne proportion.
-    let (w, h) = (image.width().max(1), image.height().max(1));
-    let ratio = target_w as f64 / target_h as f64;
-    let (crop_w, crop_h) = if w as f64 / h as f64 > ratio { ((h as f64 * ratio) as u32, h) } else { (w, (w as f64 / ratio) as u32) };
-    let cropped = image.crop_imm((w - crop_w) / 2, (h - crop_h) / 2, crop_w.max(1), crop_h.max(1));
-    let resized = if crop_w > target_w { cropped.resize_exact(target_w, target_h, FilterType::Lanczos3) } else { cropped };
+    let (x, y, w, h) = crop_rect(image.width(), image.height(), kind, crop);
+    let cropped = image.crop_imm(x, y, w, h);
+    let resized = if w > target_w { cropped.resize_exact(target_w, target_h, FilterType::Lanczos3) } else { cropped };
     let mut out = std::io::Cursor::new(Vec::new());
     let ext = match kind {
         ProfileImage::Avatar => {
@@ -206,6 +293,41 @@ fn prepare_image(source: &Path, kind: ProfileImage) -> Result<(Vec<u8>, &'static
         }
     };
     Ok((out.into_inner(), ext))
+}
+
+fn is_animated_gif(bytes: &[u8]) -> bool {
+    use image::AnimationDecoder;
+    image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+        .map(|decoder| decoder.into_frames().take(2).count() > 1)
+        .unwrap_or(false)
+}
+
+/// Recadre chaque image d'un GIF animé (même cadre pour toutes), réduit, réencode.
+fn crop_gif(bytes: &[u8], kind: ProfileImage, crop: Crop) -> Result<Vec<u8>> {
+    use image::{
+        codecs::gif::{GifDecoder, GifEncoder, Repeat},
+        imageops::FilterType,
+        AnimationDecoder, Frame,
+    };
+    let frames = GifDecoder::new(std::io::Cursor::new(bytes))?.into_frames().collect_frames().context("GIF illisible")?;
+    let first = frames.first().ok_or_else(|| anyhow!("GIF vide"))?;
+    let (x, y, w, h) = crop_rect(first.buffer().width(), first.buffer().height(), kind, crop);
+    let (target_w, target_h) = match kind {
+        ProfileImage::Avatar => (GIF_AVATAR_SIZE, GIF_AVATAR_SIZE),
+        ProfileImage::Banner => GIF_BANNER_SIZE,
+    };
+    let mut out = Vec::new();
+    {
+        let mut encoder = GifEncoder::new_with_speed(&mut out, 20);
+        encoder.set_repeat(Repeat::Infinite)?;
+        for frame in frames.into_iter().take(300) {
+            let delay = frame.delay();
+            let part = image::imageops::crop_imm(frame.buffer(), x, y, w, h).to_image();
+            let part = if w > target_w { image::imageops::resize(&part, target_w, target_h, FilterType::Triangle) } else { part };
+            encoder.encode_frame(Frame::from_parts(part, 0, 0, delay))?;
+        }
+    }
+    Ok(out)
 }
 
 fn sha_b64(bytes: &[u8]) -> String {
@@ -406,9 +528,53 @@ impl Engine {
         Ok(())
     }
 
-    /// Nouvelle photo de profil ou bannière, à partir d'une image (PNG, JPEG, GIF, WebP, BMP).
+    /// Profil en grand : profil, appareil, groupes en commun, relation.
+    pub fn profile_details(&self, id: &str) -> Option<ProfileDetails> {
+        let inner = &self.inner;
+        let profile = self.profile(id)?;
+        let me = profile.me;
+        let pseudo = if me {
+            inner.identity.read().unwrap_or_else(|p| p.into_inner()).pseudo.clone()
+        } else {
+            lock(&inner.pseudos).get(id).cloned().unwrap_or_default()
+        };
+        let (device_name, platform, public_key, online) = if me {
+            let identity = inner.identity.read().unwrap_or_else(|p| p.into_inner());
+            (identity.name.clone(), identity.platform.clone(), identity.public_key.clone(), true)
+        } else if let Some(peer) = lock(&inner.peers).get(id) {
+            (peer.device.name.clone(), peer.device.platform.clone(), peer.device.public_key.clone(), peer.online())
+        } else if let Some(peer) = lock(&inner.trusted).get(id) {
+            (peer.name.clone(), peer.platform.clone(), peer.public_key.clone(), false)
+        } else {
+            let member = inner.any_member(id)?;
+            (member.name, member.platform, member.public_key, false)
+        };
+        let trusted = !me && lock(&inner.trusted).get(id).is_some_and(|peer| peer.public_key == public_key);
+        let member = crate::protocol::MemberInfo { id: id.to_string(), name: device_name.clone(), platform: platform.clone(), public_key: public_key.clone() };
+        let friend = inner.friend_states()(&member, me);
+        Some(ProfileDetails {
+            profile,
+            device_name,
+            pseudo,
+            platform,
+            fingerprint: crate::crypto::fingerprint(&public_key),
+            online,
+            trusted,
+            groups: if me { Vec::new() } else { inner.shared_groups(id) },
+            friend,
+        })
+    }
+
+    /// Nouvelle photo de profil ou bannière, à partir d'une image (PNG, JPEG, GIF, WebP, BMP),
+    /// recadrée au centre.
     pub fn set_profile_image(&self, kind: ProfileImage, source: &Path) -> Result<()> {
-        let (bytes, ext) = prepare_image(source, kind)?;
+        self.set_profile_image_cropped(kind, source, Crop::default())
+    }
+
+    /// Nouvelle photo de profil ou bannière, recadrée comme l'utilisateur l'a réglé. Un GIF animé
+    /// peut prendre quelques secondes : à appeler hors du fil de l'interface.
+    pub fn set_profile_image_cropped(&self, kind: ProfileImage, source: &Path, crop: Crop) -> Result<()> {
+        let (bytes, ext) = prepare_image(source, kind, crop)?;
         {
             let mut profiles = lock(&self.inner.profiles);
             let dir = profiles.mine_dir();
@@ -458,16 +624,44 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("large.png");
         image::RgbImage::from_pixel(1200, 600, image::Rgb([200, 30, 30])).save(&source).unwrap();
-        let (avatar, ext) = prepare_image(&source, ProfileImage::Avatar).unwrap();
+        let (avatar, ext) = prepare_image(&source, ProfileImage::Avatar, Crop::default()).unwrap();
         assert_eq!(ext, "png");
         let decoded = image::load_from_memory(&avatar).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (256, 256));
-        let (banner, ext) = prepare_image(&source, ProfileImage::Banner).unwrap();
+        let (banner, ext) = prepare_image(&source, ProfileImage::Banner, Crop::default()).unwrap();
         assert_eq!(ext, "jpg");
         let decoded = image::load_from_memory(&banner).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (960, 384));
         fs::write(dir.join("faux.png"), b"pas une image").unwrap();
-        assert!(prepare_image(&dir.join("faux.png"), ProfileImage::Avatar).is_err());
+        assert!(prepare_image(&dir.join("faux.png"), ProfileImage::Avatar, Crop::default()).is_err());
+
+        // Cadre : jamais hors de l'image, à la bonne proportion, plus petit avec le zoom.
+        assert_eq!(crop_rect(1200, 600, ProfileImage::Avatar, Crop::default()), (300, 0, 600, 600));
+        assert_eq!(crop_rect(1200, 600, ProfileImage::Avatar, Crop { zoom: 2.0, x: 0.0, y: 1.0 }), (0, 300, 300, 300));
+        assert_eq!(crop_rect(1000, 1000, ProfileImage::Banner, Crop { zoom: 1.0, x: 0.5, y: 0.0 }), (0, 0, 1000, 400));
+        let (_, _, w, h) = crop_rect(1000, 1000, ProfileImage::Banner, Crop { zoom: 20.0, x: 2.0, y: -1.0 });
+        assert_eq!((w, h), (125, 50));
+
+        // Aperçu.
+        let preview = CropSource::open(&source).unwrap().preview(ProfileImage::Banner, Crop::default(), 300);
+        assert_eq!((preview.width(), preview.height()), (300, 120));
+
+        // GIF animé : recadré, toujours animé.
+        let gif_path = dir.join("anime.gif");
+        {
+            use image::{codecs::gif::GifEncoder, Delay, Frame};
+            let mut file = fs::File::create(&gif_path).unwrap();
+            let mut encoder = GifEncoder::new(&mut file);
+            for shade in [40_u8, 200] {
+                let frame = image::RgbaImage::from_pixel(400, 300, image::Rgba([shade, 0, 0, 255]));
+                encoder.encode_frame(Frame::from_parts(frame, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+            }
+        }
+        let (gif, ext) = prepare_image(&gif_path, ProfileImage::Banner, Crop::default()).unwrap();
+        assert_eq!(ext, "gif");
+        assert!(is_animated_gif(&gif));
+        let decoded = image::load_from_memory(&gif).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 160));
         let _ = fs::remove_dir_all(&dir);
     }
 }

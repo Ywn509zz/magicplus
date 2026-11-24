@@ -162,9 +162,17 @@ cargo test
    en Bluetooth : l'appareil apparaît « via Bluetooth » dans Appareils, et discussions, demandes d'ami,
    presse-papiers et fichiers passent par là (plus lentement : environ 100 Ko/s). Il faut toujours
    **associer** les appareils dans MagicPlus (empreintes), ou être dans un groupe commun.
-8. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
+8. **Profils** : Paramètres → Mon profil. En choisissant une photo ou une bannière, une fenêtre de
+   **recadrage** règle le zoom et la partie gardée (jamais d'étirement ; un GIF animé reste animé).
+   Le **profil en grand** (photo de quelqu'un → « Profil complet », ou bouton « Profil » dans
+   Appareils) montre bannière, photo, pseudo, pronoms, présentation, groupes en commun, et propose
+   « Envoyer un message » ou « Ajouter en ami ».
+9. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
    « Paramètres » porte une pastille. **Paramètres → Mises à jour → Télécharger et installer**, puis
-   **Redémarrer et installer** : MagicPlus se remplace et redémarre.
+   **Redémarrer et installer** : MagicPlus se remplace et redémarre. Au premier lancement de la
+   nouvelle version, une fenêtre résume les **nouveautés** (tirées de `CHANGELOG.md`, intégré au
+   programme ; à rouvrir depuis Paramètres → Mises à jour → Voir les nouveautés). **À chaque version,
+   ajouter sa section en tête de `CHANGELOG.md`** (un test vérifie qu'elle correspond à `Cargo.toml`).
 
 ---
 
@@ -576,6 +584,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `MAGICPLUS_PORTS=46454,46455` | Autres ports d'annonce et de connexion : une copie lancée à côté de la vraie, invisible des appareils du réseau. |
 | `MAGICPLUS_FAKE_FIREWALL=1` | Affiche l'avertissement du pare-feu Windows (captures). |
 | `MAGICPLUS_TEST_NOTICE=1` | Une notification d'essai 3 s après le démarrage. |
+| `MAGICPLUS_START_PROFILE=moi` | macOS : ouvre le profil en grand (`moi` ou le nom d'un appareil). Slint : captures `profil-complet`, `nouveautes`. |
 | `MAGICPLUS_NO_BLUETOOTH=1` | Pas de Bluetooth (copie de développement à côté de la vraie). |
 | `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation, `MAGICPLUS_START_CANVAS=1` (ou `historique`) ses canevas. |
 | `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série. |

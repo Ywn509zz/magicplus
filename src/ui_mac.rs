@@ -331,6 +331,10 @@ struct Ivars {
     /// Menu stylisé ouvert et les actions de ses boutons.
     popover: RefCell<Option<Retained<objc2_app_kit::NSPopover>>>,
     popover_actions: RefCell<Vec<menus::Action>>,
+    /// Recadrage d'une photo ou d'une bannière en cours.
+    crop_editor: RefCell<Option<profile_page::CropEditor>>,
+    /// Profil en grand ouvert.
+    full_profile: RefCell<Option<profile_page::FullProfile>>,
     /// Fenêtre principale (cachée au lieu d'être fermée : MagicPlus reste joignable).
     main_window: OnceCell<Retained<NSWindow>>,
     /// Barre des menus, notifications, anti-« App Nap ».
@@ -489,6 +493,42 @@ define_class!(
             if let Some(id) = self.close_profile_popover() {
                 self.chat_with(&id);
             }
+        }
+
+        #[unsafe(method(peerProfile:))]
+        fn peer_profile_action(&self, sender: &NSButton) {
+            let id = self.ivars().peer_ids.borrow().get(sender.tag().max(0) as usize).cloned();
+            if let Some(id) = id {
+                self.show_full_profile(&id);
+            }
+        }
+
+        #[unsafe(method(showWhatsNew:))]
+        fn show_whats_new_action(&self, _sender: &AnyObject) {
+            let notes = self.engine().current_release_notes();
+            self.show_release_notes("Nouveautés de MagicPlus", &notes);
+        }
+
+        #[unsafe(method(whatsNewAtLaunch:))]
+        fn whats_new_at_launch(&self, _timer: &NSTimer) {
+            self.maybe_show_whats_new();
+        }
+
+        #[unsafe(method(profileFull:))]
+        fn profile_full_action(&self, _sender: &AnyObject) {
+            if let Some(id) = self.close_profile_popover() {
+                self.show_full_profile(&id);
+            }
+        }
+
+        #[unsafe(method(fullProfileAction:))]
+        fn full_profile_action_selector(&self, sender: &NSButton) {
+            self.full_profile_action(sender.tag());
+        }
+
+        #[unsafe(method(cropChanged:))]
+        fn crop_changed_action(&self, _sender: &AnyObject) {
+            self.crop_changed();
         }
 
         #[unsafe(method(profileEdit:))]
@@ -1317,6 +1357,9 @@ impl Controller {
             };
             action.setTag(index as isize);
             if peer.trusted && !peer.key_changed {
+                let profile = button("Profil", sel!(peerProfile:), self, mtm);
+                profile.setTag(index as isize);
+                row.addView_inGravity(&profile, NSStackViewGravity::Trailing);
                 let alias = button("Surnom…", sel!(peerAlias:), self, mtm);
                 alias.setTag(index as isize);
                 alias.setToolTip(Some(&ns("Donner un surnom à cet appareil (visible seulement ici)")));
@@ -1577,7 +1620,7 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&ns("MagicPlus"));
-    window.setContentMinSize(NSSize::new(820.0, 560.0));
+    window.setContentMinSize(NSSize::new(660.0, 460.0));
     let root = window.contentView().expect("vue de contenu");
 
     // ---- barre latérale
@@ -1963,6 +2006,7 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
     update_row.addArrangedSubview(&update_action);
     update_row.addArrangedSubview(&update_check);
     update_row.addArrangedSubview(&update_page);
+    update_row.addArrangedSubview(&button("Voir les nouveautés", sel!(showWhatsNew:), controller, mtm));
     update_card.addArrangedSubview(&update_row);
 
     let look_card = card_in(&content, Some("Apparence"), mtm);
@@ -2113,6 +2157,18 @@ pub fn run(engine: Engine) {
     }
     controller.refresh(true);
     let _ = engine.take_dirty();
+    // Développement : profil en grand (`moi`, ou nom d'un appareil) pour les captures.
+    if let Ok(name) = std::env::var("MAGICPLUS_START_PROFILE") {
+        let snapshot = engine.snapshot();
+        let id = if name == "moi" {
+            Some(snapshot.identity.id.clone())
+        } else {
+            snapshot.peers.iter().find(|p| p.name == name).map(|p| p.id.clone())
+        };
+        if let Some(id) = id {
+            controller.show_full_profile(&id);
+        }
+    }
 
     let _hotkeys = setup_hotkeys(&engine);
     // L'interface relit l'état du moteur toutes les 150 ms, et seulement s'il a changé.
@@ -2132,6 +2188,16 @@ pub fn run(engine: Engine) {
         window.makeKeyAndOrderFront(None);
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
+        // Après une mise à jour : les nouveautés, une fois la fenêtre affichée.
+        let _ = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.6,
+                as_target(&controller),
+                sel!(whatsNewAtLaunch:),
+                None,
+                false,
+            )
+        };
     }
     app.run();
 }

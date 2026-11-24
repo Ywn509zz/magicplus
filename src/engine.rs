@@ -29,6 +29,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Durée d'affichage d'un message d'état dans le bandeau du bas.
+pub(crate) const STATUS_SHOWN: Duration = Duration::from_secs(7);
+
 /// Un appareil qui n'a rien annoncé depuis ce délai est « hors ligne ».
 pub(crate) const ONLINE_WINDOW: Duration = Duration::from_secs(8);
 /// Un appareil non associé silencieux depuis ce délai disparaît de la liste.
@@ -371,6 +374,11 @@ pub(crate) struct Inner {
     pub received: Mutex<Vec<ReceivedView>>,
     pub clipboard: Mutex<Option<ClipboardView>>,
     pub status: Mutex<String>,
+    /// Moment du dernier message d'état : le bandeau s'efface ensuite tout seul.
+    pub status_at: Mutex<Instant>,
+    pub status_expired: AtomicBool,
+    /// Premier lancement sur cet appareil (pas de « nouveautés » à montrer).
+    pub fresh_install: bool,
     /// Appareils refusés faute d'association (pour afficher « demande d'association »).
     pub refused: Mutex<HashMap<String, Instant>>,
     /// Résolution des adresses saisies à la main, mise à jour par le fil d'annonces
@@ -420,6 +428,7 @@ impl Engine {
     pub fn start(cfg: Config) -> Result<Engine> {
         let store = Store::new(cfg.data_dir.clone()).context("dossier de données inaccessible")?;
 
+        let fresh_install = store.load::<StoredIdentity>("identity.json").is_none();
         let identity = match store.load::<StoredIdentity>("identity.json") {
             Some(identity) => identity,
             None => {
@@ -469,6 +478,9 @@ impl Engine {
                 received: Mutex::default(),
                 clipboard: Mutex::default(),
                 status: Mutex::new("Recherche des appareils du réseau local…".to_string()),
+                status_at: Mutex::new(Instant::now()),
+                status_expired: AtomicBool::new(false),
+                fresh_install,
                 refused: Mutex::default(),
                 manual_resolved: Mutex::default(),
                 other_versions: Mutex::default(),
@@ -515,6 +527,11 @@ impl Engine {
         }
         crate::friends::spawn_friend_scheduler(engine.inner.clone());
         crate::bluetooth::spawn(engine.inner.clone());
+        // Premier lancement, ou rien de nouveau : on retient la version (sinon l'interface montre
+        // les nouveautés puis appelle `dismiss_whats_new`).
+        if engine.whats_new().is_none() {
+            engine.dismiss_whats_new();
+        }
         Ok(engine)
     }
 
@@ -672,7 +689,8 @@ impl Engine {
             transfers: lock(&inner.transfers).clone(),
             received: lock(&inner.received).clone(),
             clipboard: lock(&inner.clipboard).clone(),
-            status: self.status(),
+            // Vide une fois le délai passé : le bandeau disparaît.
+            status: if lock(&inner.status_at).elapsed() < STATUS_SHOWN { self.status() } else { String::new() },
             settings,
             receive_folder,
             chat_unread,
@@ -948,6 +966,10 @@ impl Engine {
         thread::spawn(move || {
             while !inner.shutdown.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_secs(1));
+                // Bandeau d'information : effacé après quelques secondes.
+                if lock(&inner.status_at).elapsed() >= STATUS_SHOWN && !inner.status_expired.swap(true, Ordering::SeqCst) {
+                    inner.touch();
+                }
                 let trusted = lock(&inner.trusted).clone();
                 let mut changed = false;
                 let mut peers = lock(&inner.peers);
@@ -1031,6 +1053,8 @@ impl Inner {
         let text = text.into();
         eprintln!("[magicplus] {text}");
         *lock(&self.status) = text;
+        *lock(&self.status_at) = Instant::now();
+        self.status_expired.store(false, Ordering::SeqCst);
         self.touch();
     }
 

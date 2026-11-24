@@ -947,6 +947,24 @@ impl Inner {
         lock(&self.chat).member(conversation, id)
     }
 
+    /// Groupes ouverts dont `id` est membre : (conversation, nom).
+    pub(crate) fn shared_groups(&self, id: &str) -> Vec<(String, String)> {
+        let chat = lock(&self.chat);
+        let mut groups: Vec<(String, String)> = chat
+            .conversations
+            .values()
+            .filter(|c| c.meta.kind == ConversationKind::Group && !c.meta.closed && c.meta.members.iter().any(|m| m.id == id))
+            .map(|c| (c.meta.id.clone(), c.meta.name.clone()))
+            .collect();
+        groups.sort_by(|a, b| a.1.cmp(&b.1));
+        groups
+    }
+
+    /// Ce membre, tel que présenté dans un de nos groupes.
+    pub(crate) fn any_member(&self, id: &str) -> Option<MemberInfo> {
+        lock(&self.chat).conversations.values().flat_map(|c| c.meta.members.iter()).find(|m| m.id == id).cloned()
+    }
+
     /// Nom d'un groupe (vide pour une conversation à deux ou inconnue).
     pub(crate) fn group_title(&self, conversation: &str) -> String {
         lock(&self.chat).conversations.get(conversation).map(|c| c.meta.name.clone()).unwrap_or_default()
