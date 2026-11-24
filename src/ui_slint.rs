@@ -118,14 +118,51 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
         .map(|peer| ChoiceItem { id: peer.id.clone().into(), name: peer.name.clone().into(), checked: false })
         .collect();
     ui.global::<ChatData>().set_direct_choices(ModelRc::new(VecModel::from(direct)));
-    ui.set_own_addresses(
-        if snapshot.local_addresses.is_empty() {
-            "Adresse de cet appareil : aucune (Wi-Fi ou Ethernet déconnecté ?)".to_string()
-        } else {
-            format!("Adresse(s) de cet appareil, à saisir sur l'autre machine :  {}", snapshot.local_addresses.join("   ·   "))
-        }
-        .into(),
-    );
+    let mut own = if snapshot.local_addresses.is_empty() {
+        "Adresse de cet appareil : aucune (Wi-Fi ou Ethernet déconnecté ?)".to_string()
+    } else {
+        format!("Adresse(s) de cet appareil, à saisir sur l'autre machine :  {}", snapshot.local_addresses.join("   ·   "))
+    };
+    if !snapshot.virtual_addresses.is_empty() {
+        own.push_str(&format!(
+            "\nCartes virtuelles ignorées (VMware, Hyper-V…), inutiles aux autres appareils :  {}",
+            snapshot.virtual_addresses.join("   ·   ")
+        ));
+    }
+    ui.set_own_addresses(own.into());
+    let (firewall_state, firewall_error) = match &snapshot.firewall {
+        magicplus_core::FirewallState::Ok | magicplus_core::FirewallState::Checking => (0, String::new()),
+        magicplus_core::FirewallState::Blocked => (2, String::new()),
+        magicplus_core::FirewallState::Fixing => (3, String::new()),
+        magicplus_core::FirewallState::Failed(error) => (4, error.clone()),
+    };
+    ui.set_firewall_state(firewall_state);
+    ui.set_firewall_error(firewall_error.into());
+    let requests: Vec<FriendRequestItem> = snapshot
+        .friend_requests
+        .iter()
+        .map(|request| {
+            let group = if request.group.is_empty() { String::new() } else { format!(" (groupe « {} »)", request.group) };
+            let (title, detail) = if request.incoming {
+                (
+                    format!("{} vous demande en ami{group}", request.name),
+                    format!(
+                        "{}  ·  Empreinte  {}  ·  accepter l'associe à ce PC",
+                        platform_label(&request.platform),
+                        request.fingerprint
+                    ),
+                )
+            } else {
+                (
+                    format!("Demande d'ami à {}{group}", request.name),
+                    if request.delivered { "Reçue : en attente de sa réponse" } else { "Partira dès que cet appareil sera en ligne" }
+                        .to_string(),
+                )
+            };
+            FriendRequestItem { id: request.id.clone().into(), title: title.into(), detail: detail.into(), incoming: request.incoming }
+        })
+        .collect();
+    ui.set_friend_requests(ModelRc::new(VecModel::from(requests)));
     match &snapshot.clipboard {
         Some(item) => {
             ui.set_has_clip(true);
@@ -388,6 +425,23 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     {
         let engine = engine.clone();
         ui.on_update_check(move || engine.check_update_now());
+    }
+    {
+        let engine = engine.clone();
+        ui.on_friend_answer(move |id, answer| {
+            let result = match answer {
+                1 => engine.answer_friend_request(&id, true),
+                0 => engine.answer_friend_request(&id, false),
+                _ => engine.cancel_friend_request(&id),
+            };
+            if let Err(error) = result {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_allow_firewall(move || engine.allow_firewall());
     }
     {
         let engine = engine.clone();

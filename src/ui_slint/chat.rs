@@ -397,9 +397,17 @@ impl Chat {
         let members: Vec<MemberItem> = conversation
             .members
             .iter()
-            .map(|m| MemberItem {
-                name: m.name.clone().into(),
-                state: (if m.me { "vous" } else if m.online { "en ligne" } else { "hors ligne" }).into(),
+            .map(|m| {
+                use magicplus_core::FriendState;
+                let presence = if m.me { "vous" } else if m.online { "en ligne" } else { "hors ligne" };
+                let (relation, friend) = match m.friend {
+                    FriendState::None => ("", 0),
+                    FriendState::Me => ("", 1),
+                    FriendState::Friend => (" · ami", 2),
+                    FriendState::Sent => (" · demande envoyée", 3),
+                    FriendState::Received => (" · demande reçue", 4),
+                };
+                MemberItem { id: m.id.clone().into(), name: m.name.clone().into(), state: format!("{presence}{relation}").into(), friend }
             })
             .collect();
         data.set_members(ModelRc::new(VecModel::from(members)));
@@ -1182,6 +1190,17 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
     on!(on_add_members, |chat| chat.add_members());
     on!(on_rename, |chat| chat.rename());
     on!(on_leave, |chat| chat.leave());
+    on!(on_friend_request, |chat, id| {
+        let Some(conversation) = chat.current() else { return };
+        if let Err(error) = chat.engine.send_friend_request(&conversation, &id) {
+            chat.status(error.to_string());
+        }
+    });
+    on!(on_friend_accept, |chat, id| {
+        if let Err(error) = chat.engine.answer_friend_request(&id, true) {
+            chat.status(error.to_string());
+        }
+    });
     on!(on_toggle_choice, |chat, index, checked| chat.toggle_choice(index, checked));
     on!(on_dialog_accepted, |chat| chat.dialog_accepted());
     on!(on_send_sticker, |chat, id| chat.send_sticker(&id));

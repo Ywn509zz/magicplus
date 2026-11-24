@@ -303,6 +303,8 @@ struct Ivars {
     engine: OnceCell<Engine>,
     widgets: OnceCell<Widgets>,
     peer_ids: RefCell<Vec<String>>,
+    /// Appareils des demandes d'ami, dans l'ordre des boutons.
+    friend_ids: RefCell<Vec<String>>,
     /// (id, chemin, nom) des fichiers reçus, dans l'ordre des lignes.
     received_files: RefCell<Vec<(String, String, String)>>,
     peers_signature: RefCell<String>,
@@ -626,6 +628,21 @@ define_class!(
             self.show_page(sender.tag() as usize);
         }
 
+        #[unsafe(method(friendAccept:))]
+        fn friend_accept(&self, sender: &NSButton) {
+            self.answer_friend(sender, Some(true));
+        }
+
+        #[unsafe(method(friendRefuse:))]
+        fn friend_refuse(&self, sender: &NSButton) {
+            self.answer_friend(sender, Some(false));
+        }
+
+        #[unsafe(method(friendCancel:))]
+        fn friend_cancel(&self, sender: &NSButton) {
+            self.answer_friend(sender, None);
+        }
+
         #[unsafe(method(pairClicked:))]
         fn pair_clicked(&self, sender: &NSButton) {
             let Some(id) = self.ivars().peer_ids.borrow().get(sender.tag() as usize).cloned() else { return };
@@ -939,6 +956,20 @@ impl Controller {
         }
     }
 
+    /// Demande d'ami : accepter (`Some(true)`), refuser (`Some(false)`) ou retirer la nôtre (`None`).
+    fn answer_friend(&self, sender: &NSButton, accept: Option<bool>) {
+        let Some(id) = self.ivars().friend_ids.borrow().get(sender.tag().max(0) as usize).cloned() else { return };
+        let engine = self.engine();
+        let result = match accept {
+            Some(accept) => engine.answer_friend_request(&id, accept),
+            None => engine.cancel_friend_request(&id),
+        };
+        if let Err(error) = result {
+            engine.set_status(error.to_string());
+        }
+        self.refresh_if_needed();
+    }
+
     fn confirm_pairing(&self, peer: &PeerView) -> bool {
         let alert = NSAlert::new(self.mtm());
         alert.setMessageText(&ns(&if peer.key_changed {
@@ -1077,6 +1108,7 @@ impl Controller {
         // Le nombre en tête évite qu'une liste vide ressemble à « jamais affichée ».
         let signature: String = std::iter::once(format!("{}\n", snapshot.peers.len()))
             .chain(snapshot.other_versions.iter().map(|o| format!("{}\n", o.message)))
+            .chain(snapshot.friend_requests.iter().map(|r| format!("{r:?}\n")))
             .chain(snapshot.peers.iter().map(|p| {
                 format!(
                     "{}|{}|{}|{}|{}|{}|{}|{}\n",
@@ -1106,6 +1138,53 @@ impl Controller {
             full_width(&inner, &row);
             full_width(list, &card);
         }
+
+        // Demandes d'ami (membres d'un groupe commun).
+        let mut friend_ids = Vec::new();
+        for request in &snapshot.friend_requests {
+            let tag = friend_ids.len() as isize;
+            friend_ids.push(request.id.clone());
+            let (card, inner) = CardView::with_stack(mtm);
+            let row = stack(false, 12.0, mtm);
+            let (icon, color) = if request.incoming {
+                ("person.crop.circle.badge.plus", NSColor::systemOrangeColor())
+            } else {
+                ("paperplane", NSColor::secondaryLabelColor())
+            };
+            row.addArrangedSubview(&symbol(icon, &color, mtm));
+            let texts = stack(true, 2.0, mtm);
+            let group = if request.group.is_empty() { String::new() } else { format!(" (groupe « {} »)", request.group) };
+            let title = if request.incoming {
+                format!("{} vous demande en ami{group}", request.name)
+            } else {
+                format!("Demande d'ami à {}{group}", request.name)
+            };
+            texts.addArrangedSubview(&strong(&title, 14.0, mtm));
+            let detail = if request.incoming {
+                format!("{}  ·  Empreinte  {}  ·  accepter l'associe à cet appareil", platform_label(&request.platform), request.fingerprint)
+            } else if request.delivered {
+                "Reçue : en attente de sa réponse".to_string()
+            } else {
+                "Partira dès que cet appareil sera en ligne".to_string()
+            };
+            texts.addArrangedSubview(&secondary(&detail, mtm));
+            row.addArrangedSubview(&texts);
+            if request.incoming {
+                let accept = button("Accepter", sel!(friendAccept:), self, mtm);
+                accept.setTag(tag);
+                let refuse = button("Refuser", sel!(friendRefuse:), self, mtm);
+                refuse.setTag(tag);
+                row.addView_inGravity(&refuse, NSStackViewGravity::Trailing);
+                row.addView_inGravity(&accept, NSStackViewGravity::Trailing);
+            } else {
+                let cancel = button("Annuler", sel!(friendCancel:), self, mtm);
+                cancel.setTag(tag);
+                row.addView_inGravity(&cancel, NSStackViewGravity::Trailing);
+            }
+            full_width(&inner, &row);
+            full_width(list, &card);
+        }
+        *self.ivars().friend_ids.borrow_mut() = friend_ids;
 
         if snapshot.peers.is_empty() {
             let (card, inner) = CardView::with_stack(mtm);
@@ -1158,8 +1237,10 @@ impl Controller {
                 ("Associé · hors ligne", NSColor::secondaryLabelColor())
             } else if peer.wants_pairing {
                 ("Demande d'association", NSColor::systemOrangeColor())
-            } else {
+            } else if peer.online {
                 ("Détecté", NSColor::systemBlueColor())
+            } else {
+                ("Détecté · hors ligne", NSColor::secondaryLabelColor())
             };
             let state_label = strong(state, 12.0, mtm);
             state_label.setTextColor(Some(&color));
@@ -1171,6 +1252,12 @@ impl Controller {
                 let title = if peer.key_changed { "Associer à nouveau" } else { "Associer" };
                 let associate = button(title, sel!(pairClicked:), self, mtm);
                 associate.setEnabled(peer.online);
+                if !peer.online {
+                    associate.setToolTip(Some(&ns(
+                        "Ses annonces n'arrivent plus. S'il est sous Windows, cliquez sur « Autoriser MagicPlus » dans \
+                         sa page Appareils (pare-feu), ou saisissez son adresse ci-dessous.",
+                    )));
+                }
                 if !peer.key_changed {
                     associate.setKeyEquivalent(&ns(""));
                 }
@@ -1196,11 +1283,17 @@ impl Controller {
 
     fn refresh_manual(&self, snapshot: &Snapshot, mtm: MainThreadMarker) {
         let widgets = self.widgets();
-        let own = if snapshot.local_addresses.is_empty() {
+        let mut own = if snapshot.local_addresses.is_empty() {
             "Adresse de cet appareil : aucune (Wi-Fi ou Ethernet déconnecté ?)".to_string()
         } else {
             format!("Adresse(s) de cet appareil, à saisir sur l'autre machine :  {}", snapshot.local_addresses.join("   ·   "))
         };
+        if !snapshot.virtual_addresses.is_empty() {
+            own.push_str(&format!(
+                "\nCartes virtuelles ignorées (VMware, Hyper-V…), inutiles aux autres appareils :  {}",
+                snapshot.virtual_addresses.join("   ·   ")
+            ));
+        }
         widgets.own_addresses.setStringValue(&ns(&own));
 
         let signature: String = snapshot
@@ -1538,7 +1631,8 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         &paragraph(
             "Si l'autre appareil n'apparaît pas tout seul (réseau d'entreprise ou d'école, Wi-Fi invité, \
              autre sous-réseau), saisissez son adresse IP : MagicPlus l'appellera directement. \
-             Il suffit de le faire sur une des deux machines.",
+             Il suffit de le faire sur une des deux machines, à condition que le pare-feu de chacune \
+             laisse passer MagicPlus (sous Windows : bouton « Autoriser MagicPlus » de sa page Appareils).",
             mtm,
         ),
     );

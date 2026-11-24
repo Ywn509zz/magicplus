@@ -89,8 +89,11 @@ export struct StickerItem {
 }
 
 export struct MemberItem {
+    id: string,
     name: string,
     state: string,
+    // 0 : pas ami (« Ajouter en ami »), 1 : vous, 2 : ami, 3 : demande envoyée, 4 : il vous demande.
+    friend: int,
 }
 
 export struct PinItem {
@@ -167,6 +170,9 @@ export global ChatData {
     callback add-members();
     callback rename();
     callback leave();
+    // Demande d'ami à un membre du groupe ; accepter la sienne.
+    callback friend-request(string);
+    callback friend-accept(string);
     callback toggle-choice(int, bool);
     callback dialog-accepted();
     callback send-sticker(string);
@@ -1628,7 +1634,7 @@ HorizontalLayout {
             group-col := VerticalLayout {
                 padding: 6px;
                 spacing: 1px;
-                if ChatData.is-creator && !ChatData.closed: MenuRow {
+                if !ChatData.closed: MenuRow {
                     icon: @image-url("icons/person-add.svg");
                     text: "Ajouter des membres…";
                     clicked => {
@@ -1644,14 +1650,33 @@ HorizontalLayout {
                         ChatData.rename();
                     }
                 }
-                if ChatData.is-creator && !ChatData.closed: MenuLine { }
+                if !ChatData.closed: MenuLine { }
                 MenuTitle {
                     text: "MEMBRES (" + ChatData.members.length + ")";
                 }
-                for member in ChatData.members: MenuRow {
-                    icon: @image-url("icons/people.svg");
-                    text: member.name + " — " + member.state;
-                    enabled: false;
+                for member in ChatData.members: VerticalLayout {
+                    spacing: 1px;
+                    MenuRow {
+                        icon: @image-url("icons/people.svg");
+                        text: member.name + " — " + member.state;
+                        enabled: false;
+                    }
+                    if member.friend == 0 && !ChatData.closed: MenuRow {
+                        icon: @image-url("icons/person-add.svg");
+                        text: "      Ajouter en ami";
+                        clicked => {
+                            group-popup.close();
+                            ChatData.friend-request(member.id);
+                        }
+                    }
+                    if member.friend == 4: MenuRow {
+                        icon: @image-url("icons/person-add.svg");
+                        text: "      Accepter sa demande d'ami";
+                        clicked => {
+                            group-popup.close();
+                            ChatData.friend-accept(member.id);
+                        }
+                    }
                 }
                 if !ChatData.closed: MenuLine { }
                 if !ChatData.closed: MenuRow {

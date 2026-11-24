@@ -5,7 +5,7 @@
 use super::chat_page::QUICK_REACTIONS;
 use super::*;
 use crate::shared::time_label;
-use magicplus_core::{markdown, ConversationKind};
+use magicplus_core::{markdown, ConversationKind, FriendState};
 use objc2::{AnyThread, Message};
 use objc2_app_kit::{NSBezelStyle, NSPopover, NSPopoverBehavior, NSViewController};
 use objc2_foundation::NSRectEdge;
@@ -298,17 +298,51 @@ impl Controller {
     pub(super) fn group_popover(&self, anchor: &NSView) {
         let Some(conversation) = self.ivars().chat.borrow().current_view() else { return };
         let mut entries = Vec::new();
-        if conversation.is_creator && !conversation.closed {
+        if !conversation.closed {
+            // Tout membre peut ajouter ses appareils associés ; seul le créateur renomme.
             entries.push(Entry::Item("person.badge.plus", "Ajouter des membres…".into(), false, Box::new(|c: &Controller| c.chat_add_members())));
-            entries.push(Entry::Item("pencil", "Renommer le groupe…".into(), false, Box::new(|c: &Controller| c.chat_rename())));
+            if conversation.is_creator {
+                entries.push(Entry::Item("pencil", "Renommer le groupe…".into(), false, Box::new(|c: &Controller| c.chat_rename())));
+            }
             entries.push(Entry::Separator);
         }
         entries.push(Entry::Note(format!("MEMBRES ({})", conversation.members.len())));
         for member in &conversation.members {
-            let state = if member.me { "vous" } else if member.online { "en ligne" } else { "hors ligne" };
+            let presence = if member.me { "vous" } else if member.online { "en ligne" } else { "hors ligne" };
+            let relation = match member.friend {
+                FriendState::Friend => " · ami",
+                FriendState::Sent => " · demande envoyée",
+                FriendState::Received => " · demande reçue",
+                FriendState::None | FriendState::Me => "",
+            };
             let id = member.id.clone();
             let symbol = if member.online || member.me { "circle.fill" } else { "circle" };
-            entries.push(Entry::Item(symbol, format!("{} — {state}", member.name), false, Box::new(move |c: &Controller| c.show_profile_near_header(&id))));
+            entries.push(Entry::Item(symbol, format!("{} — {presence}{relation}", member.name), false, Box::new(move |c: &Controller| c.show_profile_near_header(&id))));
+            let conversation_id = conversation.id.clone();
+            let id = member.id.clone();
+            match member.friend {
+                FriendState::None if !conversation.closed => entries.push(Entry::Item(
+                    "person.crop.circle.badge.plus",
+                    "      Ajouter en ami".to_string(),
+                    false,
+                    Box::new(move |c: &Controller| {
+                        if let Err(error) = c.engine().send_friend_request(&conversation_id, &id) {
+                            c.engine().set_status(error.to_string());
+                        }
+                    }),
+                )),
+                FriendState::Received => entries.push(Entry::Item(
+                    "person.crop.circle.badge.checkmark",
+                    "      Accepter sa demande d'ami".to_string(),
+                    false,
+                    Box::new(move |c: &Controller| {
+                        if let Err(error) = c.engine().answer_friend_request(&id, true) {
+                            c.engine().set_status(error.to_string());
+                        }
+                    }),
+                )),
+                _ => {}
+            }
         }
         if !conversation.closed {
             entries.push(Entry::Separator);

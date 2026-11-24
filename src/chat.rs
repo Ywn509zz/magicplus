@@ -44,6 +44,7 @@ const PASTE_DIR: &str = "coller";
 /// Envoi par lots : au plus tant d'événements ou d'octets par message réseau.
 const BATCH_EVENTS: usize = 200;
 const BATCH_BYTES: usize = 1024 * 1024;
+const MAX_GROUP_MEMBERS: usize = 64;
 const TYPING_SHOWN: Duration = Duration::from_secs(6);
 const TYPING_THROTTLE: Duration = Duration::from_secs(3);
 const SYNC_RETRY_MIN: Duration = Duration::from_secs(2);
@@ -66,6 +67,8 @@ pub struct MemberView {
     pub name: String,
     pub online: bool,
     pub me: bool,
+    /// Ami (associé), demande en cours, ou rien : « Ajouter en ami ».
+    pub friend: crate::friends::FriendState,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +190,10 @@ struct Meta {
     local_files: BTreeMap<String, String>,
     #[serde(default)]
     created_ms: u64,
+    /// Membres partis : une liste de membres un peu ancienne ne les fait pas revenir
+    /// (seul un nouvel ajout explicite le peut).
+    #[serde(default)]
+    left: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,28 +354,35 @@ impl ChatStore {
         match &event.kind {
             ChatKind::GroupUpdate { name, members } if author == meta.creator => {
                 let creator = name_of(members, author);
-                if event.seq == 1 || meta.members.is_empty() {
+                let first = event.seq == 1 || meta.members.is_empty();
+                // Jamais de retrait ici : un membre ajouté par un autre, ou plus tard, reste membre.
+                let added = merge_members(&mut meta.members, members, &meta.left);
+                if first {
                     note = Some(format!("{creator} a créé le groupe « {name} »"));
-                } else {
-                    let before: BTreeSet<&str> = meta.members.iter().map(|m| m.id.as_str()).collect();
-                    let added: Vec<String> =
-                        members.iter().filter(|m| !before.contains(m.id.as_str())).map(|m| m.name.clone()).collect();
-                    note = Some(if !added.is_empty() {
-                        format!("{creator} a ajouté {}", added.join(", "))
-                    } else if *name != meta.name {
-                        format!("{creator} a renommé le groupe en « {name} »")
-                    } else {
-                        format!("{creator} a mis à jour le groupe")
-                    });
+                } else if !added.is_empty() {
+                    note = Some(format!("{creator} a ajouté {}", added.join(", ")));
+                } else if *name != meta.name {
+                    note = Some(format!("{creator} a renommé le groupe en « {name} »"));
                 }
                 meta.name = name.clone();
-                meta.members = members.clone();
-                if !meta.members.iter().any(|m| m.id == me) {
-                    meta.closed = true;
+            }
+            ChatKind::AddMembers { members } if meta.kind == ConversationKind::Group => {
+                let adder = name_of(&meta.members, author);
+                // Ajout explicite : même un membre parti peut revenir.
+                for member in members {
+                    meta.left.remove(&member.id);
                 }
+                merge_members(&mut meta.members, members, &BTreeSet::new());
+                if members.iter().any(|m| m.id == me) && author != me {
+                    meta.closed = false;
+                }
+                // Tous les noms de l'événement : un membre déjà appris par un autre chemin compte aussi.
+                let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+                note = Some(format!("{adder} a ajouté {}", names.join(", ")));
             }
             ChatKind::Leave => {
                 note = Some(format!("{} a quitté le groupe", name_of(&meta.members, author)));
+                meta.left.insert(author.to_string());
                 if author == me {
                     meta.closed = true;
                 } else {
@@ -464,6 +478,22 @@ impl ChatStore {
     }
 }
 
+/// Ajoute à `members` ceux de `incoming` qui n'y sont pas (et ne sont pas partis).
+/// Retourne les noms des membres ajoutés.
+fn merge_members(members: &mut Vec<MemberInfo>, incoming: &[MemberInfo], left: &BTreeSet<String>) -> Vec<String> {
+    let mut added = Vec::new();
+    for member in incoming {
+        if members.len() >= MAX_GROUP_MEMBERS {
+            break;
+        }
+        if !left.contains(&member.id) && !members.iter().any(|m| m.id == member.id) {
+            members.push(member.clone());
+            added.push(member.name.clone());
+        }
+    }
+    added
+}
+
 /// Met à jour la liste des messages affichés à partir d'un événement du journal.
 fn apply_to_messages(messages: &mut Vec<Msg>, stored: &Stored) {
     let event = &stored.event;
@@ -531,7 +561,7 @@ fn apply_to_messages(messages: &mut Vec<Msg>, stored: &Stored) {
                 }
             }
         }
-        ChatKind::GroupUpdate { .. } | ChatKind::Leave => {
+        ChatKind::GroupUpdate { .. } | ChatKind::AddMembers { .. } | ChatKind::Leave => {
             if let Some(note) = &stored.note {
                 insert(
                     messages,
@@ -592,6 +622,16 @@ fn apply_to_messages(messages: &mut Vec<Msg>, stored: &Stored) {
 const PIN_NOTE: &str = "📌";
 
 /// Vérifie un événement reçu (longueurs, identifiants) avant de l'appliquer.
+fn validate_members(members: &[MemberInfo]) -> Result<()> {
+    if members.len() > MAX_GROUP_MEMBERS
+        || members.iter().any(|m| !valid_name(&m.id) || m.name.chars().count() > 80 || m.platform.len() > 32)
+        || members.iter().any(|m| crypto::public_from_b64(&m.public_key).is_err())
+    {
+        bail!("groupe invalide");
+    }
+    Ok(())
+}
+
 fn validate(kind: &ChatKind) -> Result<()> {
     match kind {
         ChatKind::Post { id, text, reply_to, attachments, forwarded } => {
@@ -624,12 +664,16 @@ fn validate(kind: &ChatKind) -> Result<()> {
             }
         }
         ChatKind::GroupUpdate { name, members } => {
-            if name.chars().count() > 80 || members.len() > 64 || members.iter().any(|m| !valid_name(&m.id)) {
+            if name.chars().count() > 80 {
                 bail!("groupe invalide");
             }
-            if members.iter().any(|m| crypto::public_from_b64(&m.public_key).is_err()) {
+            validate_members(members)?;
+        }
+        ChatKind::AddMembers { members } => {
+            if members.is_empty() {
                 bail!("groupe invalide");
             }
+            validate_members(members)?;
         }
         ChatKind::Leave | ChatKind::Unknown => {}
         ChatKind::Pin { target, .. } => {
@@ -655,7 +699,13 @@ impl Inner {
     }
 
     /// Applique les événements d'un auteur. Retourne le dernier numéro appliqué sans trou.
-    pub(crate) fn receive_chat_events(&self, sender: &SenderInfo, conversation_id: &str, events: Vec<ChatEvent>) -> Result<u64> {
+    pub(crate) fn receive_chat_events(
+        &self,
+        sender: &SenderInfo,
+        conversation_id: &str,
+        events: Vec<ChatEvent>,
+        group: Option<GroupInfo>,
+    ) -> Result<u64> {
         if !valid_name(conversation_id) {
             bail!("conversation invalide");
         }
@@ -690,6 +740,36 @@ impl Inner {
                     read_sent: BTreeMap::new(),
                     local_files: BTreeMap::new(),
                     created_ms: now_ms(),
+                    left: BTreeSet::new(),
+                }
+            } else if let Some(info) = group.as_ref().filter(|info| {
+                // Groupe présenté par un appareil associé qui en est membre (ajout par n'importe quel
+                // membre, ou ajout après la création) : la liste vient de lui.
+                sender.trusted
+                    && conversation_id.starts_with("g-")
+                    && info.name.chars().count() <= 80
+                    && valid_name(&info.creator)
+                    && validate_members(&info.members).is_ok()
+                    && info.members.iter().any(|m| m.id == me.id && m.public_key == me.public_key)
+                    && info.members.iter().any(|m| m.id == sender.id && m.public_key == sender.public_key)
+            }) {
+                Meta {
+                    id: conversation_id.to_string(),
+                    kind: ConversationKind::Group,
+                    name: info.name.clone(),
+                    creator: info.creator.clone(),
+                    members: info.members.clone(),
+                    closed: false,
+                    my_seq: 0,
+                    lamport: 0,
+                    applied: BTreeMap::new(),
+                    acked: BTreeMap::new(),
+                    my_read: 0,
+                    read_by: BTreeMap::new(),
+                    read_sent: BTreeMap::new(),
+                    local_files: BTreeMap::new(),
+                    created_ms: now_ms(),
+                    left: BTreeSet::new(),
                 }
             } else if let Some(ChatEvent { kind: ChatKind::GroupUpdate { members, .. }, .. }) = first {
                 if !sender.trusted
@@ -715,6 +795,7 @@ impl Inner {
                     read_sent: BTreeMap::new(),
                     local_files: BTreeMap::new(),
                     created_ms: now_ms(),
+                    left: BTreeSet::new(),
                 }
             } else {
                 return Err(refusal("unknown-conversation", "conversation inconnue pour l'instant"));
@@ -751,6 +832,21 @@ impl Inner {
             last = event.seq;
         }
         chat.typing.remove(&(conversation_id.to_string(), sender.id.clone()));
+
+        // Membres connus de l'expéditeur et pas encore de nous (ajout dont l'événement n'est pas
+        // encore arrivé, ou écrit par une version qui ne le comprenait pas).
+        if let Some(info) = group.filter(|info| validate_members(&info.members).is_ok()) {
+            if let Some(conversation) = chat.conversations.get_mut(conversation_id) {
+                let meta = &mut conversation.meta;
+                if meta.kind == ConversationKind::Group && !meta.closed {
+                    let left = meta.left.clone();
+                    if !merge_members(&mut meta.members, &info.members, &left).is_empty() {
+                        chat.save();
+                        chat.bump();
+                    }
+                }
+            }
+        }
         Ok(last)
     }
 
@@ -793,6 +889,16 @@ impl Inner {
         lock(&self.chat).bump();
     }
 
+    /// Membre `id` de la conversation (avec la clé présentée dans le groupe).
+    pub(crate) fn group_member(&self, conversation: &str, id: &str) -> Option<MemberInfo> {
+        lock(&self.chat).member(conversation, id)
+    }
+
+    /// Nom d'un groupe (vide pour une conversation à deux ou inconnue).
+    pub(crate) fn group_title(&self, conversation: &str) -> String {
+        lock(&self.chat).conversations.get(conversation).map(|c| c.meta.name.clone()).unwrap_or_default()
+    }
+
     /// Clé d'un membre de groupe (présenté par son créateur), pour une connexion entrante.
     pub(crate) fn chat_member_by_key(&self, id: &str, public_key: &str) -> Option<MemberInfo> {
         lock(&self.chat).member_by_key(id, public_key)
@@ -826,13 +932,18 @@ impl Inner {
         let target = self.chat_target(conversation, member).ok_or_else(|| anyhow!("hors ligne"))?;
         let mut channel = self.connect(&target)?;
         loop {
-            let batch: Vec<ChatEvent> = {
+            let (batch, group): (Vec<ChatEvent>, Option<GroupInfo>) = {
                 let chat = lock(&self.chat);
                 let Some(state) = chat.conversations.get(conversation) else { return Ok(()) };
+                let group = (state.meta.kind == ConversationKind::Group).then(|| GroupInfo {
+                    name: state.meta.name.clone(),
+                    creator: state.meta.creator.clone(),
+                    members: state.meta.members.clone(),
+                });
                 let acked = state.meta.acked.get(member).copied().unwrap_or(0);
                 let me = &chat.me;
                 let mut size = 0;
-                state
+                let batch: Vec<ChatEvent> = state
                     .events
                     .iter()
                     .filter(|stored| &stored.author == me && stored.event.seq > acked)
@@ -842,10 +953,12 @@ impl Inner {
                     })
                     .take(BATCH_EVENTS)
                     .map(|stored| stored.event.clone())
-                    .collect()
+                    .collect();
+                (batch, group)
             };
             let Some(last) = batch.last().map(|event| event.seq) else { break };
-            self.write_message(&mut channel, &Message::ChatEvents { conversation: conversation.to_string(), events: batch }, &[])?;
+            let message = Message::ChatEvents { conversation: conversation.to_string(), events: batch, group };
+            self.write_message(&mut channel, &message, &[])?;
             let ack = read_ack(&mut channel).ok_or_else(|| anyhow!("{} ne répond pas", target.name))?;
             if !ack.ok {
                 bail!("{}", explain_refusal(&ack, &target.name));
@@ -990,6 +1103,7 @@ impl Engine {
                 read_sent: BTreeMap::new(),
                 local_files: BTreeMap::new(),
                 created_ms: now_ms(),
+                    left: BTreeSet::new(),
             });
         }
         Ok(id)
@@ -1042,27 +1156,43 @@ impl Engine {
             read_sent: BTreeMap::new(),
             local_files: BTreeMap::new(),
             created_ms: now_ms(),
+                    left: BTreeSet::new(),
         });
         chat.emit(&id, ChatKind::GroupUpdate { name: name.chars().take(80).collect(), members })?;
         Ok(id)
     }
 
-    /// Ajoute des appareils associés à un groupe (créateur seulement).
+    /// Ajoute au groupe des appareils associés. N'importe quel membre peut le faire : leurs clés
+    /// sont présentées aux autres membres, qui peuvent ensuite leur demander d'être amis.
     pub fn add_group_members(&self, conversation: &str, member_ids: &[String]) -> Result<()> {
         let added = self.trusted_members(member_ids)?;
         let mut chat = lock(&self.inner.chat);
+        let me = chat.me.clone();
         let state = chat.conversations.get(conversation).ok_or_else(|| anyhow!("groupe introuvable"))?;
-        if state.meta.creator != chat.me || state.meta.kind != ConversationKind::Group {
-            bail!("seul le créateur du groupe peut ajouter des membres");
+        if state.meta.kind != ConversationKind::Group {
+            bail!("on n'ajoute des membres qu'à un groupe");
         }
-        let mut members = state.meta.members.clone();
-        for member in added {
-            if !members.iter().any(|m| m.id == member.id) {
-                members.push(member);
-            }
+        if state.meta.closed {
+            bail!("vous avez quitté ce groupe");
         }
-        let name = state.meta.name.clone();
-        chat.emit(conversation, ChatKind::GroupUpdate { name, members })?;
+        let new: Vec<MemberInfo> =
+            added.into_iter().filter(|member| !state.meta.members.iter().any(|m| m.id == member.id)).collect();
+        if new.is_empty() {
+            bail!("ces appareils sont déjà dans le groupe");
+        }
+        if state.meta.members.len() + new.len() > MAX_GROUP_MEMBERS {
+            bail!("un groupe compte au plus {MAX_GROUP_MEMBERS} membres");
+        }
+        // Le créateur garde l'ancien événement (compris aussi par les versions 0.9), sauf pour
+        // faire revenir un membre parti.
+        let kind = if state.meta.creator == me && new.iter().all(|m| !state.meta.left.contains(&m.id)) {
+            let mut members = state.meta.members.clone();
+            members.extend(new);
+            ChatKind::GroupUpdate { name: state.meta.name.clone(), members }
+        } else {
+            ChatKind::AddMembers { members: new }
+        };
+        chat.emit(conversation, kind)?;
         Ok(())
     }
 
@@ -1271,6 +1401,7 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         let display = self.inner.display_names();
+        let friend_state = self.inner.friend_states();
         let chat = lock(&self.inner.chat);
         let me = chat.me.clone();
         let mut list: Vec<ConversationView> = chat
@@ -1318,7 +1449,13 @@ impl Engine {
                     members: meta
                         .members
                         .iter()
-                        .map(|m| MemberView { id: m.id.clone(), name: name_of(&m.id), online: m.id == me || online.contains(&m.id), me: m.id == me })
+                        .map(|m| MemberView {
+                            id: m.id.clone(),
+                            name: name_of(&m.id),
+                            online: m.id == me || online.contains(&m.id),
+                            me: m.id == me,
+                            friend: friend_state(m, m.id == me),
+                        })
                         .collect(),
                     unread,
                     last_preview,

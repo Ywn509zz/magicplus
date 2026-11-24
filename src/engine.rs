@@ -77,6 +77,16 @@ impl Config {
         config.update_repository = Some(
             std::env::var("MAGICPLUS_UPDATE_REPO").unwrap_or_else(|_| crate::update::DEFAULT_REPOSITORY.to_string()),
         );
+        // Développement : autres ports (« 46454,46455 »), pour une copie lancée à côté de la vraie
+        // sans être vue par les appareils du réseau.
+        let ports = std::env::var("MAGICPLUS_PORTS").ok().and_then(|value| {
+            let (discovery, transfer) = value.split_once(',')?;
+            Some((discovery.trim().parse().ok()?, transfer.trim().parse().ok()?))
+        });
+        if let Some((discovery, transfer)) = ports {
+            config.discovery_port = discovery;
+            config.transfer_port = transfer;
+        }
         config
     }
 }
@@ -190,6 +200,12 @@ pub struct Snapshot {
     pub other_versions: Vec<OtherVersionView>,
     /// Mises à jour de MagicPlus.
     pub update: crate::update::UpdateView,
+    /// Adresses des cartes réseau virtuelles (VMware, Hyper-V…), inutiles aux autres appareils.
+    pub virtual_addresses: Vec<String>,
+    /// Pare-feu de Windows : à régler si les autres appareils ne peuvent pas joindre celui-ci.
+    pub firewall: crate::firewall::FirewallState,
+    /// Demandes d'ami reçues et envoyées.
+    pub friend_requests: Vec<crate::friends::FriendRequestView>,
 }
 
 /// Appareil MagicPlus d'une autre version : il s'annonce, mais les deux appareils s'ignorent.
@@ -289,6 +305,10 @@ pub(crate) struct Inner {
     pub canvases: Mutex<crate::canvas::CanvasStore>,
     /// Pseudos des autres appareils, appris par leurs annonces (id → pseudo).
     pub pseudos: Mutex<HashMap<String, String>>,
+    /// Pare-feu (Windows) : MagicPlus peut-il être joint par les autres appareils ?
+    pub firewall: Mutex<crate::firewall::FirewallState>,
+    /// Demandes d'ami entre membres d'un même groupe.
+    pub friends: Mutex<crate::friends::FriendStore>,
     /// Tests : la coupure simulée n'a lieu qu'une fois.
     pub test_cut_done: AtomicBool,
     /// Discussions (conversations, journal d'événements, synchronisation).
@@ -336,6 +356,7 @@ impl Engine {
         let profiles = crate::profile::ProfileStore::load(store.dir());
         let canvases = crate::canvas::CanvasStore::load(store.dir());
         let pseudos: HashMap<String, String> = store.load("pseudos.json").unwrap_or_default();
+        let friends = crate::friends::FriendStore::load(&store);
 
         let trusted: HashMap<String, TrustedPeer> = store
             .load::<Vec<TrustedPeer>>("trusted.json")
@@ -370,6 +391,13 @@ impl Engine {
                 profiles: Mutex::new(profiles),
                 canvases: Mutex::new(canvases),
                 pseudos: Mutex::new(pseudos),
+                // Développement : `MAGICPLUS_FAKE_FIREWALL=1` montre l'avertissement du pare-feu.
+                firewall: Mutex::new(if std::env::var_os("MAGICPLUS_FAKE_FIREWALL").is_some() {
+                    crate::firewall::FirewallState::Blocked
+                } else {
+                    crate::firewall::FirewallState::Ok
+                }),
+                friends: Mutex::new(friends),
                 test_cut_done: AtomicBool::new(false),
                 chat: Mutex::new(chat),
                 dirty: AtomicBool::new(true),
@@ -385,6 +413,8 @@ impl Engine {
         crate::profile::spawn_profile_scheduler(engine.inner.clone());
         crate::canvas::spawn_canvas_scheduler(engine.inner.clone());
         engine.spawn_update_checker();
+        engine.spawn_firewall_checker();
+        crate::friends::spawn_friend_scheduler(engine.inner.clone());
         Ok(engine)
     }
 
@@ -513,9 +543,10 @@ impl Engine {
             .map(|other| other.view.clone())
             .collect();
         other_versions.sort_by(|a, b| a.name.cmp(&b.name));
+        let (local_addresses, virtual_addresses) = shareable_addresses();
         Snapshot {
             identity,
-            local_addresses: local_ipv4_addresses(),
+            local_addresses,
             manual,
             peers,
             transfers: lock(&inner.transfers).clone(),
@@ -527,7 +558,69 @@ impl Engine {
             chat_unread,
             other_versions,
             update: self.update(),
+            virtual_addresses,
+            firewall: lock(&inner.firewall).clone(),
+            friend_requests: self.friend_requests(),
         }
+    }
+
+    // ---------------------------------------------------------------- pare-feu (Windows)
+
+    fn spawn_firewall_checker(&self) {
+        if !crate::firewall::SUPPORTED {
+            return;
+        }
+        let inner = self.inner.clone();
+        thread::spawn(move || {
+            let mut next = Instant::now();
+            while !inner.shutdown.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_secs(1));
+                if Instant::now() < next {
+                    continue;
+                }
+                next = Instant::now() + Duration::from_secs(15 * 60);
+                if matches!(*lock(&inner.firewall), crate::firewall::FirewallState::Fixing) {
+                    continue;
+                }
+                let state = crate::firewall::check();
+                let mut current = lock(&inner.firewall);
+                if *current != state && !matches!(*current, crate::firewall::FirewallState::Fixing) {
+                    *current = state;
+                    drop(current);
+                    inner.touch();
+                }
+            }
+        });
+    }
+
+    /// Autorise MagicPlus dans le pare-feu de Windows (une fenêtre de Windows demande l'accord).
+    pub fn allow_firewall(&self) {
+        use crate::firewall::FirewallState;
+        {
+            let mut state = lock(&self.inner.firewall);
+            if *state == FirewallState::Fixing {
+                return;
+            }
+            *state = FirewallState::Fixing;
+        }
+        self.inner.touch();
+        self.inner.set_status("Autorisation de MagicPlus dans le pare-feu : acceptez la fenêtre de Windows…");
+        let inner = self.inner.clone();
+        thread::spawn(move || {
+            let result = crate::firewall::allow(inner.cfg.discovery_port, inner.cfg.transfer_port);
+            let state = match &result {
+                Ok(()) => crate::firewall::check(),
+                Err(error) => FirewallState::Failed(error.to_string()),
+            };
+            let message = match (&result, &state) {
+                (Ok(()), FirewallState::Ok) => "MagicPlus est autorisé dans le pare-feu : les autres appareils peuvent maintenant joindre ce PC".to_string(),
+                (Ok(()), _) => "Règles ajoutées, mais Windows bloque encore MagicPlus (pare-feu géré par l'entreprise ou un antivirus ?)".to_string(),
+                (Err(error), _) => format!("Pare-feu non modifié : {error}"),
+            };
+            *lock(&inner.firewall) = state;
+            inner.set_status(message);
+            inner.touch();
+        });
     }
 
     // ---------------------------------------------------------------- appairage
@@ -820,7 +913,7 @@ impl Inner {
         self.touch();
     }
 
-    fn save_trusted(&self) -> Result<()> {
+    pub(crate) fn save_trusted(&self) -> Result<()> {
         let list: Vec<TrustedPeer> = lock(&self.trusted).values().cloned().collect();
         self.store.save("trusted.json", &list)?;
         self.touch();
@@ -1018,7 +1111,13 @@ impl Inner {
     /// Ouvre un canal chiffré (Noise) vers un appareil associé.
     pub(crate) fn connect(&self, target: &Target) -> Result<Channel> {
         let stream = TcpStream::connect_timeout(&target.address, Duration::from_secs(5))
-            .map_err(|error| anyhow!("appareil inaccessible sur le réseau local ({error})"))?;
+            .map_err(|error| {
+                anyhow!(
+                    "{} injoignable ({error}) : son pare-feu bloque sans doute MagicPlus. Sur cet appareil, ouvrez \
+                     Appareils et cliquez sur « Autoriser MagicPlus » (Windows)",
+                    target.name
+                )
+            })?;
         stream.set_nodelay(true).ok();
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
@@ -1073,6 +1172,9 @@ impl Inner {
         } else if let Some(member) = self.chat_member_by_key(&remote_id, &key_b64) {
             // Membre d'un groupe, présenté par son créateur : discussions de ce groupe seulement.
             SenderInfo { id: member.id, name: member.name, platform: member.platform, public_key: member.public_key, trusted: false }
+        } else if let Some(sender) = self.friend_request_sender(&remote_id, &key_b64) {
+            // Appareil à qui nous avons demandé d'être ami : seulement sa réponse.
+            sender
         } else {
             // Le nom n'est repris que si l'appareil annoncé a bien cette clé (pas d'usurpation).
             let known = lock(&self.peers).get(&remote_id).and_then(|peer| {
@@ -1198,8 +1300,8 @@ impl Inner {
                 }
                 Ok(Reply::None)
             }
-            Message::ChatEvents { conversation, events } => {
-                let applied = self.receive_chat_events(sender, &conversation, events)?;
+            Message::ChatEvents { conversation, events, group } => {
+                let applied = self.receive_chat_events(sender, &conversation, events, group)?;
                 Ok(Reply::Offset(applied))
             }
             Message::ChatTyping { conversation } => {
@@ -1217,6 +1319,14 @@ impl Inner {
             Message::CanvasSync { conversation, canvas, update, state } => {
                 let reply = self.receive_canvas_sync(sender, &conversation, canvas, &update, &state)?;
                 Ok(Reply::Data(reply))
+            }
+            Message::FriendRequest { conversation } => {
+                let reply = self.receive_friend_request(sender, &conversation)?;
+                Ok(Reply::Data(reply))
+            }
+            Message::FriendAnswer { accepted } => {
+                self.receive_friend_answer(sender, accepted)?;
+                Ok(Reply::None)
             }
         }
     }
@@ -1292,20 +1402,40 @@ fn copy_selection_to_clipboard() -> Result<()> {
     Ok(())
 }
 
-/// Adresses IPv4 de cette machine, hors boucle locale.
-pub fn local_ipv4_addresses() -> Vec<String> {
-    let mut addresses: Vec<String> = if_addrs::get_if_addrs()
+/// Adresses IPv4 de cette machine, hors boucle locale, avec « carte virtuelle ? ».
+fn local_ipv4_interfaces() -> Vec<(String, bool)> {
+    let mut addresses: Vec<(String, bool)> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .filter(|interface| !interface.is_loopback())
         .filter_map(|interface| match interface.addr {
-            if_addrs::IfAddr::V4(address) if !address.ip.is_link_local() => Some(address.ip.to_string()),
+            if_addrs::IfAddr::V4(address) if !address.ip.is_link_local() => {
+                Some((address.ip.to_string(), crate::firewall::is_virtual_adapter(&interface.name)))
+            }
             _ => None,
         })
         .collect();
     addresses.sort();
-    addresses.dedup();
+    addresses.dedup_by(|a, b| a.0 == b.0);
     addresses
+}
+
+/// Toutes les adresses IPv4 de cette machine, hors boucle locale (cartes virtuelles comprises).
+pub fn local_ipv4_addresses() -> Vec<String> {
+    local_ipv4_interfaces().into_iter().map(|(ip, _)| ip).collect()
+}
+
+/// Adresses à donner aux autres appareils, puis celles des cartes virtuelles (mises à part,
+/// sauf s'il n'y a qu'elles).
+pub fn shareable_addresses() -> (Vec<String>, Vec<String>) {
+    let (virtual_ones, real): (Vec<_>, Vec<_>) = local_ipv4_interfaces().into_iter().partition(|(_, virtual_one)| *virtual_one);
+    let real: Vec<String> = real.into_iter().map(|(ip, _)| ip).collect();
+    let virtual_ones: Vec<String> = virtual_ones.into_iter().map(|(ip, _)| ip).collect();
+    if real.is_empty() {
+        (virtual_ones, Vec::new())
+    } else {
+        (real, virtual_ones)
+    }
 }
 
 /// `ip`, `ip:port`, `nom` ou `nom:port` vers des adresses IPv4 (port de découverte par défaut).

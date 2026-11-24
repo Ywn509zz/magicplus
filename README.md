@@ -103,7 +103,9 @@ cargo test
   autre version signalé (plus ancienne ou plus récente).
 - `tests/chat.rs` : discussion à deux (réponse, modification, réaction, accusé de lecture, « écrit… »,
   suppression), messages **complets et dans l'ordre** après une longue absence du destinataire,
-  groupe de trois membres présentés par le créateur (sans association entre eux), pièces jointes et
+  groupe de trois membres présentés par le créateur (sans association entre eux), **membres ajoutés
+  par n'importe quel membre et après la création**, **demandes d'ami** (acceptée, croisée, refusée),
+  pièces jointes et
   autocollants, profils (reçus par un associé et par un simple membre de groupe), **canevas** à
   trois (frappes simultanées fusionnées, arrivée en moins de 3 s, versions nommées, restauration,
   renommage, suppression). `donnees_de_demo` (ignoré) fabrique des discussions de démonstration dans
@@ -116,7 +118,12 @@ cargo test
 
 1. Ouvrir MagicPlus sur les deux machines, sur le même réseau. Elles apparaissent dans **Appareils**.
    Sinon (réseau d'entreprise, Wi-Fi invité…), saisir l'adresse IP de l'autre machine dans
-   **Connexion par adresse IP** (l'adresse de chaque machine y est affichée). Une seule machine suffit.
+   **Connexion par adresse IP** (l'adresse de chaque machine y est affichée ; celles des cartes
+   virtuelles VMware, Hyper-V, WSL… sont mises à part, elles ne servent pas aux autres appareils).
+   Une seule machine suffit.
+   **Sous Windows**, si la page Appareils affiche « Le pare-feu de Windows bloque MagicPlus », cliquer
+   **Autoriser MagicPlus** (Windows demande l'accord administrateur) : sans cela, le PC peut voir les
+   autres sans qu'eux puissent le joindre (« Détecté · hors ligne » chez eux).
 2. Sur **chacune**, cliquer **Associer** et vérifier que l'empreinte affichée est identique à celle de
    l'autre écran (ligne « cet appareil »).
    Tant qu'un appareil ne vous a pas associé, ses envois sont refusés : il est alors marqué
@@ -136,6 +143,9 @@ cargo test
    bouton trombone pour en choisir. Survol (Windows) ou bouton « … » (Mac) d'un message : réagir,
    répondre, modifier, supprimer ; clic droit : même menu. Bouton autocollant : envoyer un autocollant
    ou un GIF de sa bibliothèque, ou en créer un à partir d'une image.
+   **Groupes** : bouton « … » en haut de la conversation : « Ajouter des membres… » (pour **tout**
+   membre, parmi ses appareils associés), liste des membres avec « Ajouter en ami » pour ceux que l'on
+   n'a pas associés ; la demande arrive dans la page Appareils de l'autre (Accepter / Refuser).
 6. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
    « Paramètres » porte une pastille. **Paramètres → Mises à jour → Télécharger et installer**, puis
    **Redémarrer et installer** : MagicPlus se remplace et redémarre.
@@ -185,6 +195,17 @@ cargo test
 - Un appareil est « en ligne » s'il s'est annoncé depuis moins de 8 s ; un appareil non associé
   disparaît après 60 s de silence.
 - Si un port est occupé au démarrage, l'app réessaie toutes les 3 s.
+- **Pare-feu Windows** (`src/firewall.rs`). Quand Windows demande l'autorisation au premier
+  lancement, il ne coche que « réseaux privés » ; sur un réseau classé « Public » (école, entreprise),
+  ou après un refus (qui crée des règles de **blocage**, prioritaires), les annonces et connexions
+  entrantes sont bloquées : le PC voit les autres mais aucun ne peut lui répondre. Au démarrage puis
+  toutes les 15 min, l'app vérifie par PowerShell (sans droits administrateur) qu'aucune règle ne
+  bloque son programme et qu'une règle l'autorise sur les réseaux actuels. Sinon, le bouton
+  « Autoriser MagicPlus » lance **une** demande d'élévation (UAC) qui supprime les règles de blocage
+  du programme et ajoute trois règles « MagicPlus » (programme, UDP 45454, TCP 45455) sur tous les
+  profils. Une connexion impossible le rappelle dans son message d'erreur.
+- **Cartes virtuelles** : les adresses des cartes VMware, VirtualBox, Hyper-V (`vEthernet`), WSL,
+  Docker, `bridge100`… (reconnues à leur nom) sont affichées à part dans la page Appareils.
 
 ### Identité et association
 
@@ -238,6 +259,10 @@ WireGuard), via la bibliothèque `snow`. Aucun octet applicatif ne circule en cl
 | `file-chunk` | `id`, `sequence` + octets (256 Ko max) | Doit arriver dans l'ordre ; écrit sur le disque, hachage au fil de l'eau. |
 | `file-complete` | `id` | Vérifie taille et SHA-256, déplace le fichier dans le dossier de réception (sans écraser). |
 | `file-cancel` | `id` | L'expéditeur abandonne : le récepteur supprime le fichier partiel. |
+| `chat-events`, `chat-typing`, `chat-read` | conversation, événements (+ `group` pour un groupe) | Discussions (voir plus bas). |
+| `profile`, `canvas-sync` | profil + images ; mise à jour Yjs | Profils et canevas (voir plus bas). |
+| `friend-request` | `conversation` (groupe commun) | Demande d'ami ; réponse `Ack.data` = `accepted` ou `pending`. |
+| `friend-answer` | `accepted` | Décision sur notre demande : associe l'appareil si acceptée. |
 
 Le récepteur répond dans le même canal chiffré par des messages JSON (`protocol::Ack`) :
 `{"ok":true,"offset":N}` juste après une offre de fichier (N = octets déjà reçus), puis, à la fin de
@@ -301,13 +326,27 @@ membre, par le même canal Noise que le reste.
   (reprenable, vérifié) dont l'offre porte `chat: {conversation, attachment}`. Le récepteur les range
   dans `discussions/pieces/` et non dans Téléchargements. 15 pièces jointes au plus par message,
   1 Go chacune ; texte de 20 000 caractères au plus.
-- **Groupes (« le créateur présente »)**. Le créateur choisit des appareils qu'**il** a associés.
+- **Groupes (« un membre présente »)**. Le créateur choisit des appareils qu'**il** a associés.
   Son événement `group-update` (nom + liste des membres avec leur clé publique) part par le canal
-  authentifié : chaque membre fait confiance aux clés présentées par le créateur, **pour ce groupe
-  seulement**. Deux membres qui ne se sont jamais associés peuvent ainsi se parler dans le groupe ; un
-  message n'est accepté que si la clé prouvée pendant la poignée de main Noise est celle d'un membre.
-  Seul le créateur ajoute des membres ou renomme le groupe ; chacun peut le quitter (`leave`, la
-  conversation passe en lecture seule). Les nouveaux membres reçoivent l'historique.
+  authentifié : chaque membre fait confiance aux clés présentées, **pour ce groupe seulement**. Deux
+  membres qui ne se sont jamais associés peuvent ainsi se parler dans le groupe ; un message n'est
+  accepté que si la clé prouvée pendant la poignée de main Noise est celle d'un membre.
+  **Depuis la 0.10, n'importe quel membre ajoute ses propres appareils associés** (`add-members`,
+  liste des seuls nouveaux) ; le créateur garde `group-update` (compris par la 0.9). Les listes de
+  membres ne font que **s'unir** (un événement plus ancien ne retire personne) ; un membre parti
+  (`leave`) reste dehors sauf nouvel ajout explicite. Chaque envoi `chat-events` d'un groupe porte
+  aussi `group` (nom, créateur, membres vus par l'expéditeur) : un membre ajouté plus tard rejoint la
+  conversation dès le premier lot reçu d'un appareil qu'il a associé, et les membres qu'un appareil
+  aurait manqués sont rattrapés. (Avant la 0.10, un membre ajouté après la création était refusé
+  chez lui.) Seul le créateur renomme ; chacun peut quitter (lecture seule). Les nouveaux membres
+  reçoivent l'historique.
+- **Demandes d'ami** (`src/friends.rs`). Dans le menu du groupe, chaque membre non associé a
+  « Ajouter en ami ». `friend-request {conversation}` part dès qu'il est en ligne ; il voit la demande
+  dans sa page Appareils (Accepter / Refuser, empreinte affichée). Accepter associe les deux appareils
+  **avec les clés présentées dans le groupe** (comme deux clics « Associer »), la réponse
+  (`friend-answer`) étant renvoyée jusqu'à réception. Deux demandes croisées s'acceptent d'elles-mêmes ;
+  une demande à un appareil déjà associé est acceptée aussitôt. Seule la réponse d'un appareil à qui
+  l'on a demandé est acceptée hors groupe. État dans `amis.json` (demandes reçues gardées 30 jours).
 - **Markdown** (`src/markdown.rs`, analyse par `pulldown-cmark`) : CommonMark complet + extensions
   GitHub (tableaux, cases à cocher, barré, encadrés `> [!NOTE]` / `[!TIP]` / `[!WARNING]`…) + habitudes
   de Discord (`__souligné__`, `-# petit texte`, retours à la ligne gardés tels quels) + couleurs
@@ -425,7 +464,8 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `canevas/<conversation>.yjs` | canevas partagés de la conversation (document Yjs) |
 | `envois.json` | envois en attente ou à reprendre |
 | `partiels/` | fichiers en cours de réception (`<id>.part`) et leur description (`<id>.json`) |
-| `discussions/etat.json` | conversations : membres, compteurs envoyés/confirmés/appliqués, lectures |
+| `discussions/etat.json` | conversations : membres (et membres partis), compteurs envoyés/confirmés/appliqués, lectures |
+| `amis.json` | demandes d'ami reçues, envoyées, et réponses à faire parvenir |
 | `discussions/evenements/<conversation>.jsonl` | journal des événements, rejoué au démarrage |
 | `discussions/pieces/`, `autocollants/`, `coller/` | pièces jointes reçues, bibliothèque d'autocollants, images collées |
 
@@ -439,6 +479,8 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/engine.rs` | État partagé, association, presse-papiers, découverte, adresses manuelles, réception des trames. |
 | `src/transfer.rs` | Transferts de fichiers reprenables : tâches d'envoi, planificateur, fichiers partiels. |
 | `src/chat.rs` | Discussions et groupes : événements numérotés, synchronisation, lectures, autocollants. |
+| `src/friends.rs` | Demandes d'ami entre membres d'un groupe : envoi, réponse, association. |
+| `src/firewall.rs` | Pare-feu Windows (vérification, autorisation en un clic) et cartes réseau virtuelles. |
 | `src/markdown.rs` | Markdown des messages (analyse, texte brut, réécriture pour Slint). |
 | `src/update.rs` | Mises à jour : recherche sur GitHub, téléchargement vérifié, remplacement de l'app. |
 | `src/profile.rs` | Profils : images, diffusion aux contacts, réception. |
@@ -468,6 +510,8 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | Variable | Effet |
 | --- | --- |
 | `MAGICPLUS_DATA_DIR=/chemin` | Autre dossier de données (seconde instance de test, captures). |
+| `MAGICPLUS_PORTS=46454,46455` | Autres ports d'annonce et de connexion : une copie lancée à côté de la vraie, invisible des appareils du réseau. |
+| `MAGICPLUS_FAKE_FIREWALL=1` | Affiche l'avertissement du pare-feu Windows (captures). |
 | `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation, `MAGICPLUS_START_CANVAS=1` (ou `historique`) ses canevas. |
 | `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série. |
 | `MAGICPLUS_DEMO_DIR=/dossier` | Avec `cargo test --test chat donnees_de_demo -- --ignored` : fabrique des discussions de démonstration. |
@@ -479,7 +523,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `MAGICPLUS_UPDATE_TEST=1` | Sans interface : cherche, télécharge, vérifie et installe la dernière version publiée, puis quitte (avec `MAGICPLUS_FAKE_VERSION=0.0.1`). |
 
 Deux instances sur une même machine ne peuvent pas partager les ports 45454/45455 : pour tester à
-deux, utiliser deux machines, ou les tests `cargo test` qui utilisent des ports dédiés.
+deux, utiliser deux machines, `MAGICPLUS_PORTS`, ou les tests `cargo test` qui utilisent des ports dédiés.
 
 ---
 
