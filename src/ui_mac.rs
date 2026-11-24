@@ -16,6 +16,8 @@ mod canvas_page;
 mod menus;
 #[path = "ui_mac_gif.rs"]
 mod gif_page;
+#[path = "ui_mac_system.rs"]
+mod system;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -285,6 +287,7 @@ struct Widgets {
     profile_remove_banner: Retained<NSButton>,
     update_text: Retained<NSTextField>,
     update_auto: Retained<NSButton>,
+    launch_at_login: Retained<NSButton>,
     update_check: Retained<NSButton>,
     update_action: Retained<NSButton>,
     update_page: Retained<NSButton>,
@@ -305,6 +308,8 @@ struct Ivars {
     engine: OnceCell<Engine>,
     widgets: OnceCell<Widgets>,
     peer_ids: RefCell<Vec<String>>,
+    /// Appareils des demandes d'ami, dans l'ordre des boutons.
+    friend_ids: RefCell<Vec<String>>,
     /// (id, chemin, nom) des fichiers reçus, dans l'ordre des lignes.
     received_files: RefCell<Vec<(String, String, String)>>,
     peers_signature: RefCell<String>,
@@ -328,7 +333,10 @@ struct Ivars {
     popover: RefCell<Option<Retained<objc2_app_kit::NSPopover>>>,
     popover_actions: RefCell<Vec<menus::Action>>,
     gif: RefCell<gif_page::GifUi>,
-    notifier: OnceCell<crate::notify::Notifier>,
+    /// Fenêtre principale (cachée au lieu d'être fermée : MagicPlus reste joignable).
+    main_window: OnceCell<Retained<NSWindow>>,
+    /// Barre des menus, notifications, anti-« App Nap ».
+    system: OnceCell<system::SystemState>,
 }
 
 define_class!(
@@ -344,10 +352,29 @@ define_class!(
             self.refresh_if_needed();
             self.chat_tick();
             self.gif_tick();
-            self.notifications_tick();
+            self.system_tick();
         }
 
-        // ---- discussions (logique dans ui_mac_chat.rs)
+        #[unsafe(method(showMainWindow:))]
+        fn show_main_window_action(&self, _sender: &AnyObject) {
+            self.show_main_window();
+        }
+
+        #[unsafe(method(showDiscussions:))]
+        fn show_discussions_action(&self, _sender: &AnyObject) {
+            self.show_main_window();
+            self.show_page(CHAT_PAGE);
+        }
+
+        #[unsafe(method(launchAtLoginChanged:))]
+        fn launch_at_login_changed(&self, sender: &NSButton) {
+            let enabled = sender.state() == NSControlStateValueOn;
+            let engine = self.engine();
+            if let Err(error) = engine.set_launch_at_login(enabled) {
+                engine.set_status(error.to_string());
+            }
+            sender.setState(if engine.launch_at_login() { NSControlStateValueOn } else { 0 });
+        }
 
         #[unsafe(method(chatSelect:))]
         fn chat_select_action(&self, sender: &AnyObject) {
@@ -646,6 +673,21 @@ define_class!(
             self.show_page(sender.tag() as usize);
         }
 
+        #[unsafe(method(friendAccept:))]
+        fn friend_accept(&self, sender: &NSButton) {
+            self.answer_friend(sender, Some(true));
+        }
+
+        #[unsafe(method(friendRefuse:))]
+        fn friend_refuse(&self, sender: &NSButton) {
+            self.answer_friend(sender, Some(false));
+        }
+
+        #[unsafe(method(friendCancel:))]
+        fn friend_cancel(&self, sender: &NSButton) {
+            self.answer_friend(sender, None);
+        }
+
         #[unsafe(method(pairClicked:))]
         fn pair_clicked(&self, sender: &NSButton) {
             let Some(id) = self.ivars().peer_ids.borrow().get(sender.tag() as usize).cloned() else { return };
@@ -843,10 +885,7 @@ define_class!(
 
         #[unsafe(method(notifTest:))]
         fn notif_test(&self, _sender: &AnyObject) {
-            let sound = self.engine().snapshot().settings.notifications.sound;
-            if let Some(notifier) = self.ivars().notifier.get() {
-                notifier.show("MagicPlus", "Les notifications fonctionnent 🎉", sound, "");
-            }
+            self.engine().test_notice();
         }
 
         #[unsafe(method(themeChanged:))]
@@ -963,8 +1002,18 @@ define_class!(
     }
 
     unsafe impl NSApplicationDelegate for Controller {
+        /// Fenêtre fermée : MagicPlus reste actif (barre des menus) et joignable par les autres.
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
+            false
+        }
+
+        /// Clic sur l'icône du Dock alors que la fenêtre est cachée.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _sender: &NSApplication, has_visible_windows: bool) -> bool {
+            if !has_visible_windows {
+                self.show_main_window();
+            }
             true
         }
 
@@ -1022,6 +1071,20 @@ impl Controller {
             button.setFont(Some(&font));
             button.setContentTintColor(Some(&tint));
         }
+    }
+
+    /// Demande d'ami : accepter (`Some(true)`), refuser (`Some(false)`) ou retirer la nôtre (`None`).
+    fn answer_friend(&self, sender: &NSButton, accept: Option<bool>) {
+        let Some(id) = self.ivars().friend_ids.borrow().get(sender.tag().max(0) as usize).cloned() else { return };
+        let engine = self.engine();
+        let result = match accept {
+            Some(accept) => engine.answer_friend_request(&id, accept),
+            None => engine.cancel_friend_request(&id),
+        };
+        if let Err(error) = result {
+            engine.set_status(error.to_string());
+        }
+        self.refresh_if_needed();
     }
 
     fn confirm_pairing(&self, peer: &PeerView) -> bool {
@@ -1135,6 +1198,7 @@ impl Controller {
             widgets.resume_popup.selectItemAtIndex(index as isize);
             widgets.auto_copy.setState(if snapshot.settings.auto_copy_received { NSControlStateValueOn } else { 0 });
             widgets.update_auto.setState(if snapshot.settings.auto_update { NSControlStateValueOn } else { 0 });
+            widgets.launch_at_login.setState(if self.engine().launch_at_login() { NSControlStateValueOn } else { 0 });
         }
 
         self.refresh_profile_settings(first);
@@ -1162,6 +1226,7 @@ impl Controller {
         // Le nombre en tête évite qu'une liste vide ressemble à « jamais affichée ».
         let signature: String = std::iter::once(format!("{}\n", snapshot.peers.len()))
             .chain(snapshot.other_versions.iter().map(|o| format!("{}\n", o.message)))
+            .chain(snapshot.friend_requests.iter().map(|r| format!("{r:?}\n")))
             .chain(snapshot.peers.iter().map(|p| {
                 format!(
                     "{}|{}|{}|{}|{}|{}|{}|{}\n",
@@ -1191,6 +1256,53 @@ impl Controller {
             full_width(&inner, &row);
             full_width(list, &card);
         }
+
+        // Demandes d'ami (membres d'un groupe commun).
+        let mut friend_ids = Vec::new();
+        for request in &snapshot.friend_requests {
+            let tag = friend_ids.len() as isize;
+            friend_ids.push(request.id.clone());
+            let (card, inner) = CardView::with_stack(mtm);
+            let row = stack(false, 12.0, mtm);
+            let (icon, color) = if request.incoming {
+                ("person.crop.circle.badge.plus", NSColor::systemOrangeColor())
+            } else {
+                ("paperplane", NSColor::secondaryLabelColor())
+            };
+            row.addArrangedSubview(&symbol(icon, &color, mtm));
+            let texts = stack(true, 2.0, mtm);
+            let group = if request.group.is_empty() { String::new() } else { format!(" (groupe « {} »)", request.group) };
+            let title = if request.incoming {
+                format!("{} vous demande en ami{group}", request.name)
+            } else {
+                format!("Demande d'ami à {}{group}", request.name)
+            };
+            texts.addArrangedSubview(&strong(&title, 14.0, mtm));
+            let detail = if request.incoming {
+                format!("{}  ·  Empreinte  {}  ·  accepter l'associe à cet appareil", platform_label(&request.platform), request.fingerprint)
+            } else if request.delivered {
+                "Reçue : en attente de sa réponse".to_string()
+            } else {
+                "Partira dès que cet appareil sera en ligne".to_string()
+            };
+            texts.addArrangedSubview(&secondary(&detail, mtm));
+            row.addArrangedSubview(&texts);
+            if request.incoming {
+                let accept = button("Accepter", sel!(friendAccept:), self, mtm);
+                accept.setTag(tag);
+                let refuse = button("Refuser", sel!(friendRefuse:), self, mtm);
+                refuse.setTag(tag);
+                row.addView_inGravity(&refuse, NSStackViewGravity::Trailing);
+                row.addView_inGravity(&accept, NSStackViewGravity::Trailing);
+            } else {
+                let cancel = button("Annuler", sel!(friendCancel:), self, mtm);
+                cancel.setTag(tag);
+                row.addView_inGravity(&cancel, NSStackViewGravity::Trailing);
+            }
+            full_width(&inner, &row);
+            full_width(list, &card);
+        }
+        *self.ivars().friend_ids.borrow_mut() = friend_ids;
 
         if snapshot.peers.is_empty() {
             let (card, inner) = CardView::with_stack(mtm);
@@ -1243,8 +1355,10 @@ impl Controller {
                 ("Associé · hors ligne", NSColor::secondaryLabelColor())
             } else if peer.wants_pairing {
                 ("Demande d'association", NSColor::systemOrangeColor())
-            } else {
+            } else if peer.online {
                 ("Détecté", NSColor::systemBlueColor())
+            } else {
+                ("Détecté · hors ligne", NSColor::secondaryLabelColor())
             };
             let state_label = strong(state, 12.0, mtm);
             state_label.setTextColor(Some(&color));
@@ -1256,6 +1370,12 @@ impl Controller {
                 let title = if peer.key_changed { "Associer à nouveau" } else { "Associer" };
                 let associate = button(title, sel!(pairClicked:), self, mtm);
                 associate.setEnabled(peer.online);
+                if !peer.online {
+                    associate.setToolTip(Some(&ns(
+                        "Ses annonces n'arrivent plus. S'il est sous Windows, cliquez sur « Autoriser MagicPlus » dans \
+                         sa page Appareils (pare-feu), ou saisissez son adresse ci-dessous.",
+                    )));
+                }
                 if !peer.key_changed {
                     associate.setKeyEquivalent(&ns(""));
                 }
@@ -1281,11 +1401,17 @@ impl Controller {
 
     fn refresh_manual(&self, snapshot: &Snapshot, mtm: MainThreadMarker) {
         let widgets = self.widgets();
-        let own = if snapshot.local_addresses.is_empty() {
+        let mut own = if snapshot.local_addresses.is_empty() {
             "Adresse de cet appareil : aucune (Wi-Fi ou Ethernet déconnecté ?)".to_string()
         } else {
             format!("Adresse(s) de cet appareil, à saisir sur l'autre machine :  {}", snapshot.local_addresses.join("   ·   "))
         };
+        if !snapshot.virtual_addresses.is_empty() {
+            own.push_str(&format!(
+                "\nCartes virtuelles ignorées (VMware, Hyper-V…), inutiles aux autres appareils :  {}",
+                snapshot.virtual_addresses.join("   ·   ")
+            ));
+        }
         widgets.own_addresses.setStringValue(&ns(&own));
 
         let signature: String = snapshot
@@ -1623,7 +1749,8 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         &paragraph(
             "Si l'autre appareil n'apparaît pas tout seul (réseau d'entreprise ou d'école, Wi-Fi invité, \
              autre sous-réseau), saisissez son adresse IP : MagicPlus l'appellera directement. \
-             Il suffit de le faire sur une des deux machines.",
+             Il suffit de le faire sur une des deux machines, à condition que le pare-feu de chacune \
+             laisse passer MagicPlus (sous Windows : bouton « Autoriser MagicPlus » de sa page Appareils).",
             mtm,
         ),
     );
@@ -1849,6 +1976,25 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         ),
     );
 
+    let background_card = card_in(&content, Some("Démarrage et notifications"), mtm);
+    let launch_at_login = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &ns("Lancer MagicPlus à l'ouverture de la session (en arrière-plan, dans la barre des menus)"),
+            Some(as_target(controller)),
+            Some(sel!(launchAtLoginChanged:)),
+            mtm,
+        )
+    };
+    background_card.addArrangedSubview(&launch_at_login);
+    full_width(
+        &background_card,
+        &paragraph(
+            "Fermer la fenêtre ne quitte pas MagicPlus : il reste joignable par vos autres appareils et vous \
+             prévient des messages. Pour le quitter : menu MagicPlus ou icône de la barre des menus → Quitter.",
+            mtm,
+        ),
+    );
+
     let update_card = card_in(&content, Some("Mises à jour"), mtm);
     let update_text = paragraph("", mtm);
     update_text.setSelectable(true);
@@ -2036,6 +2182,7 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         profile_remove_banner,
         update_text,
         update_auto,
+        launch_at_login,
         update_check,
         update_action,
         update_page,
@@ -2081,24 +2228,6 @@ fn build_menu(app: &NSApplication, mtm: MainThreadMarker) {
     app.setMainMenu(Some(&main));
 }
 
-impl Controller {
-    /// Nouveaux messages → notifications de macOS ; clic sur l'une d'elles → la conversation.
-    fn notifications_tick(&self) {
-        let Some(notifier) = self.ivars().notifier.get() else { return };
-        let app = NSApplication::sharedApplication(self.mtm());
-        let focused = (app.isActive() && self.ivars().current_page.get() == chat_page::CHAT_PAGE).then(|| self.current_conversation_id()).flatten();
-        notifier.deliver(self.engine(), focused.as_deref());
-        if let Some(conversation) = notifier.take_clicked() {
-            #[allow(deprecated)]
-            app.activateIgnoringOtherApps(true);
-            if !conversation.is_empty() {
-                self.show_page(chat_page::CHAT_PAGE);
-                self.open_conversation(&conversation);
-            }
-        }
-    }
-}
-
 /// Thème de couleur : apparence claire ou sombre (ou celle du système) et fond des fenêtres.
 fn apply_theme(theme: &crate::themes::ThemeDef, mtm: MainThreadMarker) {
     use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
@@ -2129,7 +2258,8 @@ pub fn run(engine: Engine) {
     let window = build_window(&controller, mtm);
     let settings = engine.snapshot().settings;
     apply_theme(crate::themes::current(settings.theme.as_deref(), settings.dark_mode), mtm);
-    let _ = controller.ivars().notifier.set(crate::notify::Notifier::new(&engine));
+    let _ = controller.ivars().main_window.set(window.clone());
+    controller.setup_system(mtm);
 
     let start_page = std::env::var("MAGICPLUS_START_PAGE")
         .ok()
@@ -2165,8 +2295,11 @@ pub fn run(engine: Engine) {
     };
 
     window.center();
-    window.makeKeyAndOrderFront(None);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
+    // Lancé à l'ouverture de la session : en arrière-plan, fenêtre cachée.
+    if !magicplus_core::autostart::launched_at_login() {
+        window.makeKeyAndOrderFront(None);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
     app.run();
 }

@@ -1,7 +1,6 @@
 // Pas de fenêtre de console sous Windows.
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
-mod notify;
 mod shared;
 mod themes;
 #[cfg(all(target_os = "macos", not(feature = "slint-on-mac")))]

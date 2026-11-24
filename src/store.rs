@@ -47,6 +47,9 @@ pub struct Settings {
     pub presence: crate::presence::Presence,
     /// « En ligne » devient « inactif » après ce nombre de minutes sans utiliser l'ordinateur (0 : jamais).
     pub auto_idle_minutes: u32,
+    /// Notifications du système (messages, demandes d'ami). La 0.11 enregistrait un simple
+    /// booléen : il est encore accepté (activées ou non).
+    #[serde(deserialize_with = "crate::presence::prefs_or_bool")]
     pub notifications: crate::presence::NotificationPrefs,
     /// Clé d'API GIPHY (recherche de GIF ; https://developers.giphy.com/dashboard/).
     pub giphy_key: Option<String>,

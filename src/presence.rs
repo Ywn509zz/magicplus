@@ -1,6 +1,6 @@
 //! Présence, comme sur Discord : en ligne, inactif, ne pas déranger, invisible ; passage
-//! automatique en « inactif » quand l'ordinateur n'est plus utilisé. Notifications des nouveaux
-//! messages (le moteur les prépare, l'interface les montre selon les préférences).
+//! automatique en « inactif » quand l'ordinateur n'est plus utilisé. Règles des notifications
+//! (préférences, mentions), appliquées par `Inner::notify`.
 //!
 //! La présence part dans chaque annonce (`Hello.presence`, toutes les 2 s). « Invisible »
 //! s'annonce « hors ligne » : les autres nous voient hors ligne, mais les messages passent.
@@ -88,43 +88,35 @@ impl Default for NotificationPrefs {
     }
 }
 
-/// Nouveau message à signaler (l'interface décide de le montrer ou non).
-#[derive(Debug, Clone, PartialEq)]
-pub struct NotificationView {
-    pub conversation: String,
-    /// Nom du groupe (vide pour une discussion à deux).
-    pub group: String,
-    pub author: String,
-    /// Texte lisible (émojis personnalisés en « :nom: », pièces jointes résumées).
-    pub text: String,
-    /// Le message nous mentionne (@pseudo ou @nom).
-    pub mention: bool,
-}
-
-impl NotificationView {
-    /// Titre et texte d'une notification, d'après les préférences.
-    pub fn render(&self, prefs: &NotificationPrefs) -> (String, String) {
-        let title = if self.group.is_empty() { self.author.clone() } else { format!("{} · {}", self.author, self.group) };
-        let body = if prefs.preview { self.text.clone() } else { "Nouveau message".to_string() };
-        (title, body)
-    }
-}
-
-/// Décide si un message mérite une notification (présence et préférences ; la question du
-/// premier plan est laissée à l'interface).
-pub fn should_notify(note: &NotificationView, prefs: &NotificationPrefs, presence: Presence) -> bool {
+/// Décide si une notification mérite d'être montrée (préférences et présence).
+pub fn should_notify(kind: crate::engine::NoticeKind, prefs: &NotificationPrefs, presence: Presence) -> bool {
+    use crate::engine::NoticeKind;
     if !prefs.enabled || presence == Presence::Dnd {
         return false;
     }
-    if note.group.is_empty() {
-        prefs.direct
-    } else {
-        match prefs.groups {
+    match kind {
+        NoticeKind::Direct => prefs.direct,
+        NoticeKind::Group { mention } => match prefs.groups {
             GroupNotifications::All => true,
-            GroupNotifications::Mentions => note.mention,
+            GroupNotifications::Mentions => mention,
             GroupNotifications::Never => false,
-        }
+        },
+        NoticeKind::Other => true,
     }
+}
+
+/// Lit les préférences, ou l'ancien réglage (un booléen : activées ou non).
+pub fn prefs_or_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<NotificationPrefs, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Prefs(NotificationPrefs),
+        Enabled(bool),
+    }
+    Ok(match Either::deserialize(deserializer)? {
+        Either::Prefs(prefs) => prefs,
+        Either::Enabled(enabled) => NotificationPrefs { enabled, ..NotificationPrefs::default() },
+    })
 }
 
 /// Vrai si `text` mentionne l'un de `names` (« @Léa », sans tenir compte des majuscules).
@@ -207,20 +199,11 @@ impl Engine {
     pub fn data_dir(&self) -> std::path::PathBuf {
         self.inner.store.dir().to_path_buf()
     }
-
-    /// Nouveaux messages arrivés depuis le dernier appel (à montrer selon les préférences).
-    pub fn take_notifications(&self) -> Vec<NotificationView> {
-        std::mem::take(&mut *lock(&self.inner.notifications))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn note(group: &str, mention: bool) -> NotificationView {
-        NotificationView { conversation: "c".into(), group: group.into(), author: "Léa".into(), text: "salut".into(), mention }
-    }
 
     #[test]
     fn effective_presence_goes_idle_and_keeps_choices() {
@@ -236,15 +219,25 @@ mod tests {
 
     #[test]
     fn notification_rules() {
+        use crate::engine::NoticeKind;
         let prefs = NotificationPrefs::default();
-        assert!(should_notify(&note("", false), &prefs, Presence::Online));
-        assert!(!should_notify(&note("", false), &prefs, Presence::Dnd));
+        assert!(should_notify(NoticeKind::Direct, &prefs, Presence::Online));
+        assert!(!should_notify(NoticeKind::Direct, &prefs, Presence::Dnd));
         let mentions_only = NotificationPrefs { groups: GroupNotifications::Mentions, ..prefs.clone() };
-        assert!(!should_notify(&note("Vacances", false), &mentions_only, Presence::Idle));
-        assert!(should_notify(&note("Vacances", true), &mentions_only, Presence::Idle));
-        let quiet = NotificationPrefs { preview: false, ..prefs };
-        assert_eq!(note("Vacances", false).render(&quiet), ("Léa · Vacances".to_string(), "Nouveau message".to_string()));
+        assert!(!should_notify(NoticeKind::Group { mention: false }, &mentions_only, Presence::Idle));
+        assert!(should_notify(NoticeKind::Group { mention: true }, &mentions_only, Presence::Idle));
+        let off = NotificationPrefs { enabled: false, ..prefs };
+        assert!(!should_notify(NoticeKind::Other, &off, Presence::Online));
         assert!(mentions("coucou @lea et @Max", &["Léa".into(), "max".into()]));
         assert!(!mentions("coucou lea", &["Léa".into()]));
+    }
+
+    #[test]
+    fn old_boolean_setting_is_read() {
+        let settings: Settings = serde_json::from_str(r#"{"notifications": false}"#).unwrap();
+        assert!(!settings.notifications.enabled);
+        let settings: Settings = serde_json::from_str(r#"{"notifications": {"groups": "mentions"}}"#).unwrap();
+        assert!(settings.notifications.enabled);
+        assert_eq!(settings.notifications.groups, GroupNotifications::Mentions);
     }
 }

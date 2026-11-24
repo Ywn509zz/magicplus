@@ -7,6 +7,7 @@ mod emoji;
 mod images;
 mod markdown;
 mod profile;
+mod tray;
 
 use crate::shared::{hotkey_labels, open_path, platform_label, reveal, setup_hotkeys, update_action, update_pending, update_texts};
 use magicplus_core::{util::format_size, Engine, Snapshot, TransferState};
@@ -119,14 +120,51 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
         .map(|peer| ChoiceItem { id: peer.id.clone().into(), name: peer.name.clone().into(), checked: false })
         .collect();
     ui.global::<ChatData>().set_direct_choices(ModelRc::new(VecModel::from(direct)));
-    ui.set_own_addresses(
-        if snapshot.local_addresses.is_empty() {
-            "Adresse de cet appareil : aucune (Wi-Fi ou Ethernet déconnecté ?)".to_string()
-        } else {
-            format!("Adresse(s) de cet appareil, à saisir sur l'autre machine :  {}", snapshot.local_addresses.join("   ·   "))
-        }
-        .into(),
-    );
+    let mut own = if snapshot.local_addresses.is_empty() {
+        "Adresse de cet appareil : aucune (Wi-Fi ou Ethernet déconnecté ?)".to_string()
+    } else {
+        format!("Adresse(s) de cet appareil, à saisir sur l'autre machine :  {}", snapshot.local_addresses.join("   ·   "))
+    };
+    if !snapshot.virtual_addresses.is_empty() {
+        own.push_str(&format!(
+            "\nCartes virtuelles ignorées (VMware, Hyper-V…), inutiles aux autres appareils :  {}",
+            snapshot.virtual_addresses.join("   ·   ")
+        ));
+    }
+    ui.set_own_addresses(own.into());
+    let (firewall_state, firewall_error) = match &snapshot.firewall {
+        magicplus_core::FirewallState::Ok | magicplus_core::FirewallState::Checking => (0, String::new()),
+        magicplus_core::FirewallState::Blocked => (2, String::new()),
+        magicplus_core::FirewallState::Fixing => (3, String::new()),
+        magicplus_core::FirewallState::Failed(error) => (4, error.clone()),
+    };
+    ui.set_firewall_state(firewall_state);
+    ui.set_firewall_error(firewall_error.into());
+    let requests: Vec<FriendRequestItem> = snapshot
+        .friend_requests
+        .iter()
+        .map(|request| {
+            let group = if request.group.is_empty() { String::new() } else { format!(" (groupe « {} »)", request.group) };
+            let (title, detail) = if request.incoming {
+                (
+                    format!("{} vous demande en ami{group}", request.name),
+                    format!(
+                        "{}  ·  Empreinte  {}  ·  accepter l'associe à ce PC",
+                        platform_label(&request.platform),
+                        request.fingerprint
+                    ),
+                )
+            } else {
+                (
+                    format!("Demande d'ami à {}{group}", request.name),
+                    if request.delivered { "Reçue : en attente de sa réponse" } else { "Partira dès que cet appareil sera en ligne" }
+                        .to_string(),
+                )
+            };
+            FriendRequestItem { id: request.id.clone().into(), title: title.into(), detail: detail.into(), incoming: request.incoming }
+        })
+        .collect();
+    ui.set_friend_requests(ModelRc::new(VecModel::from(requests)));
     match &snapshot.clipboard {
         Some(item) => {
             ui.set_has_clip(true);
@@ -142,6 +180,7 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
         ui.set_resume_index(index as i32);
         ui.set_auto_copy(snapshot.settings.auto_copy_received);
         ui.set_update_auto(snapshot.settings.auto_update);
+        ui.set_notifications_on(snapshot.settings.notifications.enabled);
     }
 }
 
@@ -166,7 +205,6 @@ const AUTO_IDLE_CHOICES: [u32; 5] = [0, 5, 10, 15, 30];
 fn load_notification_settings(ui: &AppWindow, settings: &magicplus_core::store::Settings) {
     use magicplus_core::GroupNotifications;
     let prefs = &settings.notifications;
-    ui.set_notif_enabled(prefs.enabled);
     ui.set_notif_direct(prefs.direct);
     ui.set_notif_groups(match prefs.groups {
         GroupNotifications::All => 0,
@@ -195,29 +233,6 @@ fn refresh_presence(ui: &AppWindow, engine: &Engine) {
     }
     if ui.get_my_presence_label() != label.as_str() {
         ui.set_my_presence_label(label.into());
-    }
-}
-
-/// MagicPlus est-il l'application au premier plan ?
-fn app_in_foreground() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        #[link(name = "user32")]
-        extern "system" {
-            fn GetForegroundWindow() -> isize;
-            fn GetWindowThreadProcessId(window: isize, process: *mut u32) -> u32;
-        }
-        // SAFETY : appels sans effet de bord ; `process` pointe sur une variable locale.
-        unsafe {
-            let window = GetForegroundWindow();
-            let mut process = 0_u32;
-            GetWindowThreadProcessId(window, &mut process);
-            window != 0 && process == std::process::id()
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        true
     }
 }
 
@@ -309,7 +324,6 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     let initial = engine.snapshot();
     apply_theme(&ui, crate::themes::current(initial.settings.theme.as_deref(), initial.settings.dark_mode));
     load_notification_settings(&ui, &initial.settings);
-    let notifier = crate::notify::Notifier::new(&engine);
     refresh(&ui, &initial, true);
     ui.global::<MarkdownStyle>().set_mono(markdown::monospace_family().into());
     let chat: Rc<chat::Chat> = chat::Chat::new(engine.clone(), &ui);
@@ -513,6 +527,44 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let engine = engine.clone();
+        ui.on_friend_answer(move |id, answer| {
+            let result = match answer {
+                1 => engine.answer_friend_request(&id, true),
+                0 => engine.answer_friend_request(&id, false),
+                _ => engine.cancel_friend_request(&id),
+            };
+            if let Err(error) = result {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_allow_firewall(move || engine.allow_firewall());
+    }
+    ui.set_launch_at_login(engine.launch_at_login());
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        ui.on_launch_at_login_changed(move |enabled| {
+            if let Err(error) = engine.set_launch_at_login(enabled) {
+                engine.set_status(error.to_string());
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_launch_at_login(engine.launch_at_login());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_notifications_changed(move |enabled| {
+            if let Err(error) = engine.update_settings(|settings| settings.notifications.enabled = enabled) {
+                engine.set_status(error.to_string());
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
         ui.on_update_act(move || {
             if update_action(&engine) {
                 let _ = slint::quit_event_loop();
@@ -564,7 +616,6 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return };
             let result = engine.update_settings(|settings| {
                 let prefs = &mut settings.notifications;
-                prefs.enabled = ui.get_notif_enabled();
                 prefs.direct = ui.get_notif_direct();
                 prefs.groups = match ui.get_notif_groups() {
                     1 => GroupNotifications::Mentions,
@@ -583,15 +634,75 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let engine = engine.clone();
-        let notifier = notifier.clone();
-        ui.on_notif_test(move || {
-            let sound = engine.snapshot().settings.notifications.sound;
-            notifier.show("MagicPlus", "Les notifications fonctionnent 🎉", sound, "");
-        });
+        ui.on_notif_test(move || engine.test_notice());
     }
 
     // ---- raccourcis globaux (doivent être enregistrés depuis le fil principal)
     let hotkeys = setup_hotkeys(&engine);
+
+    // ---- arrière-plan (Windows) : icône de la zone de notification, notifications du système.
+    // Fenêtre fermée : MagicPlus reste actif et joignable ; « Quitter » est dans le menu de l'icône.
+    let tray = tray::Tray::new().map(Rc::new);
+    let last_notice: Rc<std::cell::RefCell<Option<String>>> = Rc::default();
+    let tray_timer = slint::Timer::default();
+    {
+        let engine = engine.clone();
+        let weak = ui.as_weak();
+        let chat = chat.clone();
+        let tray = tray.clone();
+        tray_timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let notices = engine.take_notices();
+            let Some(tray) = &tray else { return };
+            for notice in notices {
+                let watching = ui.get_page() == chat::CHAT_PAGE
+                    && notice.conversation.is_some()
+                    && notice.conversation == chat.current_conversation()
+                    && tray::is_foreground("MagicPlus");
+                if !watching || notice.even_if_visible {
+                    tray.notify(&notice.title, &notice.body, notice.silent);
+                    *last_notice.borrow_mut() = Some(notice.conversation.clone().unwrap_or_default());
+                }
+            }
+            for event in tray.take_events() {
+                match event {
+                    tray::TrayEvent::Quit => {
+                        let _ = slint::quit_event_loop();
+                    }
+                    tray::TrayEvent::Open | tray::TrayEvent::NoticeClicked => {
+                        let _ = ui.show();
+                        tray::bring_to_front("MagicPlus");
+                        if event == tray::TrayEvent::NoticeClicked {
+                            match last_notice.borrow().clone() {
+                                Some(conversation) if !conversation.is_empty() => {
+                                    ui.set_page(chat::CHAT_PAGE);
+                                    chat.open_conversation(&conversation);
+                                }
+                                Some(_) => ui.set_page(0),
+                                None => {}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Première fermeture de la fenêtre : on explique que MagicPlus continue de tourner.
+    if let Some(tray) = &tray {
+        let tray = tray.clone();
+        let explained = std::cell::Cell::new(false);
+        ui.window().on_close_requested(move || {
+            if !explained.replace(true) {
+                tray.notify(
+                    "MagicPlus reste actif",
+                    "Il reste joignable par vos appareils et vous prévient des messages. Clic droit sur son icône pour le quitter.",
+                    true,
+                );
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
 
     // ---- rafraîchissement : l'interface ne se redessine que si le moteur a changé
     let timer = slint::Timer::default();
@@ -600,24 +711,11 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         let engine = engine.clone();
         let weak = ui.as_weak();
         let chat = chat.clone();
-        let notifier = notifier.clone();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
             chat.tick();
             canvas.tick();
             if let Some(ui) = weak.upgrade() {
                 refresh_presence(&ui, &engine);
-                // Nouveaux messages → notifications du système (pas pour la discussion lue à l'écran).
-                let focused = (app_in_foreground() && ui.get_page() == chat::CHAT_PAGE).then(|| chat.shown_conversation()).flatten();
-                notifier.deliver(&engine, focused.as_deref());
-                // Clic sur une notification : MagicPlus revient, sur la conversation.
-                if let Some(conversation) = notifier.take_clicked() {
-                    let _ = ui.show();
-                    ui.window().set_minimized(false);
-                    if !conversation.is_empty() {
-                        ui.set_page(chat::CHAT_PAGE);
-                        chat.open_conversation(&conversation);
-                    }
-                }
             }
             let profiles = engine.profiles_revision();
             if profiles != profiles_seen.get() {
@@ -819,7 +917,17 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    ui.run()?;
+    if tray.is_some() {
+        // Lancé à l'ouverture de la session : seulement l'icône, fenêtre cachée.
+        if !magicplus_core::autostart::launched_at_login() {
+            ui.show()?;
+        }
+        slint::run_event_loop_until_quit()?;
+        let _ = ui.hide();
+    } else {
+        ui.run()?;
+    }
+    drop(tray);
     engine.shutdown();
     drop(hotkeys);
     Ok(())

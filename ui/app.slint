@@ -30,6 +30,14 @@ export struct PeerItem {
     wants-pairing: bool,
 }
 
+export struct FriendRequestItem {
+    id: string,
+    title: string,
+    detail: string,
+    // Reçue (Accepter / Refuser) ; sinon envoyée (Annuler).
+    incoming: bool,
+}
+
 export struct TransferItem {
     id: string,
     file-name: string,
@@ -235,8 +243,8 @@ component PeerCard inherits Card {
             horizontal-stretch: 0;
             alignment: center;
             Pill {
-                text: root.peer.key-changed ? "Clé modifiée" : root.peer.trusted ? (root.peer.online ? "Associé · en ligne" : "Associé · hors ligne") : root.peer.wants-pairing ? "Demande d'association" : "Détecté";
-                tint: root.peer.key-changed ? Theme.danger : root.peer.trusted ? (root.peer.online ? Theme.success : Theme.neutral) : root.peer.wants-pairing ? Theme.warning : Theme.accent;
+                text: root.peer.key-changed ? "Clé modifiée" : root.peer.trusted ? (root.peer.online ? "Associé · en ligne" : "Associé · hors ligne") : root.peer.wants-pairing ? "Demande d'association" : root.peer.online ? "Détecté" : "Détecté · hors ligne";
+                tint: root.peer.key-changed ? Theme.danger : root.peer.trusted ? (root.peer.online ? Theme.success : Theme.neutral) : root.peer.wants-pairing ? Theme.warning : root.peer.online ? Theme.accent : Theme.neutral;
             }
         }
 
@@ -506,6 +514,9 @@ export component AppWindow inherits Window {
     in property <bool> update-has-page;
     in property <bool> update-pending;
     in-out property <bool> update-auto: true;
+    // Démarrage avec la session, notifications du système.
+    in-out property <bool> launch-at-login;
+    in-out property <bool> notifications-on: true;
     // Mon profil (Paramètres).
     in property <ProfileItem> my-profile;
     // Ma présence (0 hors ligne/invisible, 1 en ligne, 2 inactif, 3 ne pas déranger) et son nom.
@@ -519,7 +530,6 @@ export component AppWindow inherits Window {
         presence-popup.show();
     }
     // Notifications et inactivité automatique (Paramètres).
-    in-out property <bool> notif-enabled: true;
     in-out property <bool> notif-direct: true;
     // 0 tous les messages, 1 mentions seulement, 2 jamais.
     in-out property <int> notif-groups;
@@ -536,6 +546,11 @@ export component AppWindow inherits Window {
     in-out property <int> profile-color-index: -1;
     out property <[color]> banner-colors: [#e5484d, #f76b15, #e2a300, #30a46c, #12a5b5, #3e7bfa, #8e4ec6, #d6409f, #a0714f, #8b8d98];
     in property <string> own-addresses;
+    // Demandes d'ami (membres d'un groupe commun).
+    in property <[FriendRequestItem]> friend-requests;
+    // Pare-feu de Windows : 0 rien à faire, 2 bloque MagicPlus, 3 réglage en cours, 4 échec.
+    in property <int> firewall-state;
+    in property <string> firewall-error;
 
     // ---- état de l'interface
     in-out property <int> page: 0;
@@ -577,6 +592,11 @@ export component AppWindow inherits Window {
     callback save-pseudo(string);
     callback set-alias(string, string);
     callback update-auto-changed(bool);
+    callback launch-at-login-changed(bool);
+    callback notifications-changed(bool);
+    // Demande d'ami : 1 accepter, 0 refuser, -1 retirer la nôtre.
+    callback friend-answer(string, int);
+    callback allow-firewall();
     callback update-check();
     callback update-act();
     callback update-open-page();
@@ -877,6 +897,91 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.firewall-state >= 2: Card {
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    IconBubble {
+                                        icon: @image-url("icons/warning.svg");
+                                        tint: Theme.warning;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: "Le pare-feu de Windows bloque MagicPlus";
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+                                        Subtle {
+                                            text: root.firewall-state == 3 ? "Acceptez la fenêtre de Windows qui demande l'autorisation…" : root.firewall-state == 4 ? "Pas modifié : " + root.firewall-error + ". Réessayez, ou demandez à l'administrateur du PC." : "Ce PC voit peut-être les autres appareils, mais eux ne peuvent pas le joindre (réseau classé « Public »). Un clic l'autorise sur tous les réseaux ; Windows demandera votre accord.";
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Button {
+                                            text: "Autoriser MagicPlus";
+                                            primary: true;
+                                            enabled: root.firewall-state != 3;
+                                            clicked => {
+                                                root.allow-firewall();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            for request in root.friend-requests: Card {
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    IconBubble {
+                                        icon: @image-url("icons/person-add.svg");
+                                        tint: request.incoming ? Theme.warning : Theme.neutral;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: request.title;
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                        }
+                                        Subtle {
+                                            text: request.detail;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        if request.incoming: HorizontalLayout {
+                                            spacing: 8px;
+                                            Button {
+                                                text: "Refuser";
+                                                clicked => {
+                                                    root.friend-answer(request.id, 0);
+                                                }
+                                            }
+                                            Button {
+                                                text: "Accepter";
+                                                primary: true;
+                                                clicked => {
+                                                    root.friend-answer(request.id, 1);
+                                                }
+                                            }
+                                        }
+                                        if !request.incoming: Button {
+                                            text: "Annuler";
+                                            clicked => {
+                                                root.friend-answer(request.id, -1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             if root.peers.length == 0: Card {
                                 HorizontalLayout {
                                     spacing: 14px;
@@ -894,7 +999,7 @@ export component AppWindow inherits Window {
                                             font-weight: 600;
                                         }
                                         Subtle {
-                                            text: "Ouvrez MagicPlus sur l'autre machine, branchée au même réseau privé. Sous Windows, autorisez MagicPlus dans le pare-feu (réseaux privés) quand Windows le demande.";
+                                            text: "Ouvrez MagicPlus sur l'autre machine, branchée au même réseau privé. Sous Windows, autorisez MagicPlus dans le pare-feu (réseaux privés et publics) quand Windows le demande.";
                                         }
                                     }
                                 }
@@ -924,7 +1029,7 @@ export component AppWindow inherits Window {
                                     text: "Connexion par adresse IP";
                                 }
                                 Subtle {
-                                    text: "Si l'autre appareil n'apparaît pas tout seul (réseau d'entreprise ou d'école, Wi-Fi invité, autre sous-réseau), saisissez son adresse IP : MagicPlus l'appellera directement. Il suffit de le faire sur une des deux machines.";
+                                    text: "Si l'autre appareil n'apparaît pas tout seul (réseau d'entreprise ou d'école, Wi-Fi invité, autre sous-réseau), saisissez son adresse IP : MagicPlus l'appellera directement. Il suffit de le faire sur une des deux machines, à condition que le pare-feu de chacune laisse passer MagicPlus.";
                                 }
                                 Text {
                                     text: root.own-addresses;
@@ -1395,19 +1500,12 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                Switch {
-                                    text: "Notifications du système pour les nouveaux messages";
-                                    checked <=> root.notif-enabled;
-                                    toggled => {
-                                        root.notif-changed();
-                                    }
-                                }
                                 VerticalLayout {
                                     spacing: 6px;
                                     padding-left: 12px;
                                     CheckBox {
                                         text: "Discussions à deux";
-                                        enabled: root.notif-enabled;
+                                        enabled: root.notifications-on;
                                         checked <=> root.notif-direct;
                                         toggled => {
                                             root.notif-changed();
@@ -1418,12 +1516,12 @@ export component AppWindow inherits Window {
                                         alignment: start;
                                         Text {
                                             text: "Groupes :";
-                                            color: root.notif-enabled ? Theme.text : Theme.subtle;
+                                            color: root.notifications-on ? Theme.text : Theme.subtle;
                                             vertical-alignment: center;
                                         }
                                         ComboBox {
                                             width: 220px;
-                                            enabled: root.notif-enabled;
+                                            enabled: root.notifications-on;
                                             model: ["Tous les messages", "Seulement si on me mentionne (@)", "Jamais"];
                                             current-index <=> root.notif-groups;
                                             selected => {
@@ -1433,7 +1531,7 @@ export component AppWindow inherits Window {
                                     }
                                     CheckBox {
                                         text: "Afficher le texte du message";
-                                        enabled: root.notif-enabled;
+                                        enabled: root.notifications-on;
                                         checked <=> root.notif-preview;
                                         toggled => {
                                             root.notif-changed();
@@ -1441,7 +1539,7 @@ export component AppWindow inherits Window {
                                     }
                                     CheckBox {
                                         text: "Jouer un son";
-                                        enabled: root.notif-enabled;
+                                        enabled: root.notifications-on;
                                         checked <=> root.notif-sound;
                                         toggled => {
                                             root.notif-changed();
@@ -1449,7 +1547,7 @@ export component AppWindow inherits Window {
                                     }
                                     CheckBox {
                                         text: "Même quand la discussion est ouverte à l'écran";
-                                        enabled: root.notif-enabled;
+                                        enabled: root.notifications-on;
                                         checked <=> root.notif-when-focused;
                                         toggled => {
                                             root.notif-changed();
@@ -1461,7 +1559,7 @@ export component AppWindow inherits Window {
                                     spacing: 10px;
                                     Button {
                                         text: "Tester une notification";
-                                        enabled: root.notif-enabled;
+                                        enabled: root.notifications-on;
                                         clicked => {
                                             root.notif-test();
                                         }
@@ -1595,6 +1693,29 @@ export component AppWindow inherits Window {
                                 }
                                 Subtle {
                                     text: "Activé : copiez sur l'autre appareil (ou Ctrl + Shift + Alt + C), puis collez directement ici.";
+                                }
+                            }
+
+                            Card {
+                                SectionTitle {
+                                    text: "Démarrage et notifications";
+                                }
+                                CheckBox {
+                                    text: "Lancer MagicPlus à l'ouverture de la session (en arrière-plan, dans la zone de notification)";
+                                    checked <=> root.launch-at-login;
+                                    toggled => {
+                                        root.launch-at-login-changed(self.checked);
+                                    }
+                                }
+                                CheckBox {
+                                    text: "Afficher une notification à chaque message ou demande d'ami reçus";
+                                    checked <=> root.notifications-on;
+                                    toggled => {
+                                        root.notifications-changed(self.checked);
+                                    }
+                                }
+                                Subtle {
+                                    text: "Fermer la fenêtre ne quitte pas MagicPlus : il reste joignable par vos autres appareils et vous prévient des messages. Pour le quitter : clic droit sur son icône près de l'horloge → Quitter MagicPlus.";
                                 }
                             }
 

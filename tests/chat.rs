@@ -1,6 +1,6 @@
 //! Discussions de bout en bout : plusieurs moteurs complets dans le même processus.
 
-use magicplus_core::{AttachmentKind, Config, Engine, MessageStatus, MessageView};
+use magicplus_core::{AttachmentKind, Config, Engine, FriendState, MessageStatus, MessageView};
 use std::{
     fs,
     net::SocketAddr,
@@ -102,12 +102,22 @@ fn direct_chat_reply_edit_reaction_read_typing_delete() {
     let b_list = b.conversations();
     let b_conversation = b_list.iter().find(|c| c.id == conversation).unwrap();
     assert_eq!(b_conversation.title, "Machine A");
+    // Notification du système : titre = l'auteur, texte sans Markdown ; rien chez l'auteur.
+    let notices = b.take_notices();
+    assert!(
+        notices.iter().any(|n| n.title == "Machine A" && n.body == "Salut B 👋" && n.conversation.as_deref() == Some(conversation.as_str())),
+        "{notices:?}"
+    );
+    assert!(a.take_notices().is_empty());
+    // Désactivées dans les réglages : plus rien.
+    b.update_settings(|s| s.notifications.enabled = false).unwrap();
     assert_eq!(b_conversation.unread, 1);
 
     // Réponse.
     let original = find(&b.messages(&conversation, 50), "Salut **B** 👋").id.clone();
     b.send_chat(&conversation, "Coucou !", Some(&original), &[]).unwrap();
     wait_for("A reçoit la réponse", Duration::from_secs(10), || texts(&a.messages(&conversation, 50)).len() == 2);
+    assert_eq!(a.take_notices().len(), 1, "A est notifié de la réponse");
     let reply = find(&a.messages(&conversation, 50), "Coucou !").reply.clone().unwrap();
     assert_eq!(reply.id, original);
     // Les extraits sont en texte brut (sans les marques Markdown).
@@ -146,6 +156,13 @@ fn direct_chat_reply_edit_reaction_read_typing_delete() {
     });
     // On ne modifie pas le message d'un autre.
     assert!(a.edit_chat(&conversation, &reply_id, "piraté").is_err());
+
+    // Notifications coupées chez B : un nouveau message n'en produit pas.
+    a.send_chat(&conversation, "Encore là ?", None, &[]).unwrap();
+    wait_for("B reçoit le dernier message", Duration::from_secs(10), || {
+        texts(&b.messages(&conversation, 50)).contains(&"Encore là ?".to_string())
+    });
+    assert!(b.take_notices().is_empty());
 
     for node in &nodes {
         node.engine.shutdown();
@@ -401,18 +418,24 @@ fn presence_and_notifications() {
     wait_for("A voit B hors ligne", Duration::from_secs(10), || presence_of(a, &id_of(b)) == Some(Presence::Offline));
     // Invisible mais joignable : les messages passent.
     let direct = b.open_direct(&id_of(a)).unwrap();
-    let _ = a.take_notifications();
+    let _ = a.take_notices();
     let my_name = a.snapshot().identity.name;
     b.send_chat(&direct, &format!("coucou @{my_name} !"), None, &[]).unwrap();
     let mut notes = Vec::new();
     wait_for("A reçoit une notification", Duration::from_secs(15), || {
-        notes.extend(a.take_notifications());
+        notes.extend(a.take_notices());
         !notes.is_empty()
     });
-    assert_eq!(notes[0].conversation, direct);
-    assert!(notes[0].group.is_empty());
-    assert!(notes[0].mention);
-    assert!(notes[0].text.contains("coucou"));
+    assert_eq!(notes[0].conversation.as_deref(), Some(direct.as_str()));
+    assert_eq!(notes[0].kind, magicplus_core::engine::NoticeKind::Direct);
+    assert!(notes[0].body.contains("coucou"));
+
+    // « Ne pas déranger » chez A : plus de notification ; un groupe « mentions seulement » non plus
+    // sans mention.
+    a.set_presence(Presence::Dnd).unwrap();
+    b.send_chat(&direct, "encore là ?", None, &[]).unwrap();
+    wait_for("message reçu", Duration::from_secs(15), || a.messages(&direct, 50).iter().any(|m| m.text == "encore là ?"));
+    assert!(a.take_notices().is_empty());
     for node in &nodes {
         node.engine.shutdown();
     }
@@ -530,7 +553,7 @@ fn pseudo_alias_pins_forward_and_any_reaction() {
 
     // Transfert vers un groupe : C voit le message et le nom public de son auteur (pas le surnom de B).
     let group = a.create_group("Famille", &[id_of(b), id_of(c)]).unwrap();
-    wait_for("groupe", Duration::from_secs(10), || has_conversation(c, &group));
+    wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
     b.forward_chat(&direct, &message, &group).unwrap();
     wait_for("C reçoit le message transféré", Duration::from_secs(10), || {
         c.messages(&group, 20).iter().any(|m| m.text.contains("samedi") && m.forwarded.as_deref() == Some("Léa"))
@@ -565,14 +588,109 @@ def partage(total, personnes=3):
 /// `MAGICPLUS_DEMO_DIR=/dossier cargo test --test chat donnees_de_demo -- --ignored`
 /// puis `MAGICPLUS_DATA_DIR=/dossier/data MAGICPLUS_START_PAGE=1 ./target/debug/magicplus`.
 #[test]
+fn any_member_adds_people_and_friend_requests() {
+    let nodes = start_nodes("amis", 5);
+    let (a, b, c, d, e) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine, &nodes[3].engine, &nodes[4].engine);
+    // A ↔ B, B ↔ C, A ↔ D, A ↔ E : C ne connaît que B ; D et E arrivent après la création.
+    for (x, y) in [(a, b), (b, c), (a, d), (a, e)] {
+        trust(x, y);
+        trust(y, x);
+    }
+    let (id_a, id_c, id_e) = (id_of(a), id_of(c), id_of(e));
+
+    let group = a.create_group("Projet", &[id_of(b)]).unwrap();
+    a.send_chat(&group, "Bienvenue", None, &[]).unwrap();
+    wait_for("B dans le groupe", Duration::from_secs(10), || texts(&b.messages(&group, 50)) == ["Bienvenue"]);
+
+    // B (pas le créateur) ajoute C, que A ne connaît pas.
+    assert!(b.conversations().iter().any(|conv| conv.id == group && !conv.is_creator));
+    b.add_group_members(&group, std::slice::from_ref(&id_c)).unwrap();
+    assert!(b.add_group_members(&group, std::slice::from_ref(&id_c)).is_err(), "déjà membre");
+    wait_for("C rejoint le groupe et lit l'historique de A", Duration::from_secs(15), || {
+        texts(&c.messages(&group, 50)) == ["Bienvenue"]
+    });
+    wait_for("A apprend l'ajout de C", Duration::from_secs(10), || {
+        a.conversations().iter().any(|conv| conv.id == group && conv.members.iter().any(|m| m.id == id_c))
+    });
+    let notes: Vec<String> = a.messages(&group, 50).into_iter().filter(|m| m.system).map(|m| m.text).collect();
+    assert!(notes.iter().any(|note| note == "Machine B a ajouté Machine C"), "{notes:?}");
+
+    // C écrit : A le reçoit sans être associé à C.
+    c.send_chat(&group, "Merci B !", None, &[]).unwrap();
+    wait_for("A reçoit le message de C", Duration::from_secs(15), || texts(&a.messages(&group, 50)).contains(&"Merci B !".to_string()));
+
+    // Le créateur ajoute D plus tard (autrefois refusé chez D).
+    a.add_group_members(&group, &[id_of(d)]).unwrap();
+    wait_for("D rejoint le groupe", Duration::from_secs(15), || {
+        let list = texts(&d.messages(&group, 50));
+        list.contains(&"Bienvenue".to_string()) && list.contains(&"Merci B !".to_string())
+    });
+    assert!(d.conversations().iter().any(|conv| conv.id == group && !conv.closed && conv.title == "Projet"));
+
+    // Demande d'ami de A vers C, acceptée.
+    let state_of = |engine: &Engine, member: &str| {
+        engine.conversations().into_iter().find(|conv| conv.id == group).unwrap().members.into_iter().find(|m| m.id == member).unwrap().friend
+    };
+    assert_eq!(state_of(a, &id_c), FriendState::None);
+    assert_eq!(state_of(a, &id_of(b)), FriendState::Friend);
+    a.send_friend_request(&group, &id_c).unwrap();
+    assert_eq!(state_of(a, &id_c), FriendState::Sent);
+    wait_for("C reçoit la demande", Duration::from_secs(15), || {
+        c.snapshot().friend_requests.iter().any(|r| r.id == id_a && r.incoming && r.group == "Projet")
+    });
+    wait_for("A voit la demande arrivée", Duration::from_secs(10), || {
+        a.snapshot().friend_requests.iter().any(|r| r.id == id_c && !r.incoming && r.delivered)
+    });
+    assert_eq!(state_of(c, &id_a), FriendState::Received);
+    assert!(c.take_notices().iter().any(|n| n.title == "Demande d'ami" && n.conversation.is_none()));
+    c.answer_friend_request(&id_a, true).unwrap();
+    assert!(c.snapshot().peers.iter().any(|p| p.id == id_a && p.trusted));
+    wait_for("A associé à C", Duration::from_secs(15), || a.snapshot().peers.iter().any(|p| p.id == id_c && p.trusted));
+    assert!(a.snapshot().friend_requests.is_empty() && c.snapshot().friend_requests.is_empty());
+    assert_eq!(state_of(a, &id_c), FriendState::Friend);
+    // Associés : la discussion à deux fonctionne directement.
+    let direct = c.open_direct(&id_a).unwrap();
+    c.send_chat(&direct, "On est amis", None, &[]).unwrap();
+    wait_for("discussion à deux A ↔ C", Duration::from_secs(10), || texts(&a.messages(&direct, 50)) == ["On est amis"]);
+
+    // Demande croisée entre C et D : acceptée des deux côtés sans clic.
+    a.send_chat(&group, "re", None, &[]).unwrap();
+    wait_for("D connaît C", Duration::from_secs(15), || {
+        d.conversations().iter().any(|conv| conv.id == group && conv.members.iter().any(|m| m.id == id_c))
+    });
+    let id_d = id_of(d);
+    c.send_friend_request(&group, &id_d).unwrap();
+    wait_for("D reçoit la demande de C", Duration::from_secs(15), || d.snapshot().friend_requests.iter().any(|r| r.id == id_c));
+    d.send_friend_request(&group, &id_c).unwrap(); // = accepter
+    wait_for("C et D associés", Duration::from_secs(15), || {
+        c.snapshot().peers.iter().any(|p| p.id == id_d && p.trusted) && d.snapshot().peers.iter().any(|p| p.id == id_c && p.trusted)
+    });
+
+    // Refus : E (ajouté par A) refuse la demande de B.
+    a.add_group_members(&group, std::slice::from_ref(&id_e)).unwrap();
+    wait_for("B connaît E", Duration::from_secs(15), || {
+        b.conversations().iter().any(|conv| conv.id == group && conv.members.iter().any(|m| m.id == id_e))
+    });
+    b.send_friend_request(&group, &id_e).unwrap();
+    wait_for("E reçoit la demande de B", Duration::from_secs(15), || e.snapshot().friend_requests.iter().any(|r| r.id == id_of(b)));
+    e.answer_friend_request(&id_of(b), false).unwrap();
+    wait_for("B apprend le refus", Duration::from_secs(15), || b.snapshot().friend_requests.is_empty());
+    assert!(!b.snapshot().peers.iter().any(|p| p.id == id_e && p.trusted));
+    assert!(!e.snapshot().peers.iter().any(|p| p.id == id_of(b) && p.trusted));
+    assert_eq!(state_of(b, &id_e), FriendState::None);
+}
+
+#[test]
 #[ignore]
 fn donnees_de_demo() {
     let Some(target) = std::env::var_os("MAGICPLUS_DEMO_DIR").map(PathBuf::from) else { return };
-    let nodes = start_nodes("demo", 3);
-    let (a, b, c) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine);
+    let nodes = start_nodes("demo", 5);
+    let (a, b, c, d, e) = (&nodes[0].engine, &nodes[1].engine, &nodes[2].engine, &nodes[3].engine, &nodes[4].engine);
     a.set_device_name("Mac de démo").unwrap();
     b.set_device_name("PC-Bureau").unwrap();
     c.set_device_name("Portable de Léa").unwrap();
+    d.set_device_name("Tablette de Sam").unwrap();
+    e.set_device_name("PC-Atelier").unwrap();
     for (from, to) in [(a, b), (a, c), (b, a), (c, a)] {
         let name = to.snapshot().identity.name;
         wait_for("voir", Duration::from_secs(10), || sees(from, &name).is_some());
@@ -639,6 +757,19 @@ fn donnees_de_demo() {
         texts(&a.messages(&group, 50)).len() == 4
             && a.messages(&direct, 50).iter().any(|m| m.attachments.iter().any(|x| x.path.is_some()))
     });
+    // Membres ajoutés par d'autres que le créateur, et une demande d'ami reçue.
+    for (x, y) in [(b, d), (d, b), (c, e), (e, c)] {
+        trust(x, y);
+    }
+    b.add_group_members(&group, &[id_of(d)]).unwrap();
+    c.add_group_members(&group, &[id_of(e)]).unwrap();
+    wait_for("D et E dans le groupe", Duration::from_secs(20), || {
+        [d, e].iter().all(|x| x.conversations().iter().any(|conv| conv.id == group && conv.members.len() == 5))
+    });
+    d.send_chat(&group, "Merci pour l'invitation 👋", None, &[]).unwrap();
+    e.send_friend_request(&group, &id_of(a)).unwrap();
+    wait_for("demande d'ami chez A", Duration::from_secs(20), || !a.snapshot().friend_requests.is_empty());
+    wait_for("message de D chez A", Duration::from_secs(20), || texts(&a.messages(&group, 50)).len() == 5);
     // Canevas partagé, écrit à plusieurs, avec un historique.
     let canvas = a.create_canvas(&group, "Préparatifs").unwrap();
     a.set_canvas_text(&group, &canvas, "# Préparatifs du week-end\n\n## À emporter\n- [x] tente\n- [ ] glacière\n").unwrap();

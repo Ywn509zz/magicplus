@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole. Les anciennes versions (`magicplus/1`, application Tauri) sont ignorées.
-pub const PROTOCOL: &str = "magicplus/5";
+pub const PROTOCOL: &str = "magicplus/4";
 pub const DEFAULT_DISCOVERY_PORT: u16 = 45454;
 pub const DEFAULT_TRANSFER_PORT: u16 = 45455;
 /// Taille d'un morceau de fichier (avant chiffrement).
@@ -93,6 +93,10 @@ pub enum Message {
     ChatEvents {
         conversation: String,
         events: Vec<ChatEvent>,
+        /// Groupe vu par l'expéditeur : permet à un membre ajouté plus tard de rejoindre la
+        /// conversation dès le premier message reçu, quel que soit son auteur.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<GroupInfo>,
     },
     /// « En train d'écrire » (éphémère, jamais enregistré).
     ChatTyping {
@@ -121,6 +125,23 @@ pub enum Message {
         update: String,
         state: String,
     },
+    /// Demande d'ami (association) envoyée à un membre d'un groupe commun.
+    FriendRequest {
+        conversation: String,
+    },
+    /// Réponse à une demande d'ami.
+    FriendAnswer {
+        accepted: bool,
+    },
+}
+
+/// Groupe tel que le voit l'expéditeur.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupInfo {
+    pub name: String,
+    pub creator: String,
+    pub members: Vec<MemberInfo>,
 }
 
 /// Image d'un profil, envoyée à la suite de l'en-tête.
@@ -231,6 +252,10 @@ pub enum ChatKind {
         members: Vec<MemberInfo>,
     },
     Leave,
+    /// Un membre (pas forcément le créateur) ajoute au groupe des appareils qu'il a associés.
+    AddMembers {
+        members: Vec<MemberInfo>,
+    },
     /// Épingle (ou désépingle) un message ; n'importe quel membre peut le faire.
     Pin {
         target: String,
@@ -302,7 +327,7 @@ mod tests {
             sent_ms: 1,
             kind: ChatKind::Post { id: "m".into(), text: "**salut**".into(), reply_to: None, attachments: vec![], forwarded: None },
         };
-        let json = serde_json::to_string(&Message::ChatEvents { conversation: "c".into(), events: vec![event.clone()] }).unwrap();
+        let json = serde_json::to_string(&Message::ChatEvents { conversation: "c".into(), events: vec![event.clone()], group: None }).unwrap();
         assert!(json.contains("\"type\":\"post\""));
         let Message::ChatEvents { events, .. } = serde_json::from_str(&json).unwrap() else { panic!() };
         assert_eq!(events, vec![event]);

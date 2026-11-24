@@ -1,6 +1,6 @@
 [package]
 name = "magicplus"
-version = "0.9.0"
+version = "0.11.0"
 edition = "2021"
 description = "MagicPlus : presse-papiers et transfert de fichiers chiffrés entre machines du réseau local."
 build = "build.rs"
@@ -42,9 +42,15 @@ emojis = "0.9.1"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 slint = "1"
 
-# Notifications du système (Windows : centre de notifications, avec clic).
+# Windows : icône de la zone de notification et notifications (API Win32).
 [target.'cfg(target_os = "windows")'.dependencies]
-tauri-winrt-notification = "0.7"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # Interface AppKit native (macOS).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -52,7 +58,7 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-quartz-core = "0.3"
-# Notifications du système (macOS : centre de notifications, avec clic).
+# Notifications du système (messages reçus).
 objc2-user-notifications = "0.3"
 block2 = "0.6"
 
