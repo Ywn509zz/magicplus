@@ -31,6 +31,8 @@
   <string>NSApplication</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>MagicPlus trouve vos autres appareils et leur envoie fichiers et presse-papiers sur le réseau local.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>MagicPlus utilise le Bluetooth pour joindre vos ordinateurs appairés quand il n'y a pas de réseau commun.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>MagicPlus demande à System Events de copier la sélection pour le raccourci « copier et envoyer ».</string>
 </dict>

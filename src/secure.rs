@@ -58,6 +58,11 @@ fn read_noise(stream: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
         _ => stream.read_exact(&mut length[1..])?,
     }
     let length = u16::from_be_bytes(length) as usize;
+    // Longueur nulle (jamais un vrai message Noise, qui fait au moins 16 octets) : fin d'envoi
+    // sur un lien sans demi-fermeture (Bluetooth).
+    if length == 0 {
+        return Ok(None);
+    }
     let mut message = vec![0_u8; length];
     stream.read_exact(&mut message)?;
     Ok(Some(message))
@@ -135,6 +140,18 @@ impl<S: Read + Write> SecureStream<S> {
 
     pub(crate) fn get_ref(&self) -> &S {
         &self.stream
+    }
+
+    /// Fin d'envoi : l'autre côté lit une fin de flux ; on peut encore lire sa réponse.
+    pub(crate) fn finish(&mut self) -> io::Result<()>
+    where
+        S: crate::link::Link,
+    {
+        if self.stream.half_close() {
+            return Ok(());
+        }
+        self.stream.write_all(&[0, 0])?;
+        self.stream.flush()
     }
 
     /// Envoie un message (chiffré, découpé en messages Noise de 64 Ko au plus).

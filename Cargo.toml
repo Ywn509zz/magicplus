@@ -1,6 +1,6 @@
 [package]
 name = "magicplus"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "MagicPlus : presse-papiers et transfert de fichiers chiffrés entre machines du réseau local."
 build = "build.rs"
@@ -43,8 +43,11 @@ slint = "1"
 # Windows : icône de la zone de notification et notifications (API Win32).
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
+    "Win32_Devices_Bluetooth",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Networking_WinSock",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -52,13 +55,16 @@ windows-sys = { version = "0.59", features = [
 
 # Interface AppKit native (macOS).
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+# `relax-sign-encoding` : en développement, IOBluetooth déclare parfois `int` là où les liaisons disent `unsigned`.
+objc2 = { version = "0.6", features = ["relax-sign-encoding"] }
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-quartz-core = "0.3"
 # Notifications du système (messages reçus).
 objc2-user-notifications = "0.3"
 block2 = "0.6"
+# Liaison Bluetooth (RFCOMM) quand il n'y a pas de réseau commun.
+objc2-io-bluetooth = "0.3"
 
 [features]
 # Développement : lance l'interface Windows (Slint) sur un Mac pour la regarder ou la photographier.

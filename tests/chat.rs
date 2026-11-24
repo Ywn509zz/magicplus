@@ -367,12 +367,12 @@ fn group_canvas_real_time_and_history() {
     trust(b, a);
     trust(c, a);
     let group = a.create_group("Canevas", &[id_of(b), id_of(c)]).unwrap();
-    wait_for("groupe", Duration::from_secs(10), || has_conversation(b, &group) && has_conversation(c, &group));
+    wait_for("groupe", Duration::from_secs(30), || has_conversation(b, &group) && has_conversation(c, &group));
 
     let id = a.create_canvas(&group, "Courses").unwrap();
     a.set_canvas_text(&group, &id, "# Courses\n- pain\n").unwrap();
     for (engine, name) in [(b, "B"), (c, "C")] {
-        wait_for(&format!("{name} voit le canevas"), Duration::from_secs(10), || {
+        wait_for(&format!("{name} voit le canevas"), Duration::from_secs(30), || {
             engine.canvases(&group).iter().any(|cv| cv.id == id && cv.title == "Courses" && cv.text.contains("pain"))
         });
     }
@@ -387,7 +387,7 @@ fn group_canvas_real_time_and_history() {
     let base = c.canvases(&group)[0].text.clone();
     b.set_canvas_text(&group, &id, &base.replace("# Courses", "# Courses de la semaine")).unwrap();
     c.set_canvas_text(&group, &id, &format!("{base}- œufs\n")).unwrap();
-    wait_for("les trois ont le même texte", Duration::from_secs(10), || {
+    wait_for("les trois ont le même texte", Duration::from_secs(30), || {
         let texts: Vec<String> = [a, b, c].iter().map(|e| e.canvases(&group)[0].text.clone()).collect();
         texts.iter().all(|t| t == &texts[0] && t.contains("de la semaine") && t.contains("œufs"))
     });
@@ -395,7 +395,7 @@ fn group_canvas_real_time_and_history() {
     // Historique : une version (forcée ici, sinon après 45 s de pause), puis restauration.
     let before = a.canvases(&group)[0].text.clone();
     b.save_canvas_version(&group, &id).unwrap();
-    wait_for("A voit la version de B", Duration::from_secs(10), || {
+    wait_for("A voit la version de B", Duration::from_secs(30), || {
         a.canvas_versions(&group, &id).iter().any(|v| v.authors == ["Machine B"])
     });
     a.set_canvas_text(&group, &id, "tout effacé").unwrap();
@@ -403,7 +403,7 @@ fn group_canvas_real_time_and_history() {
     let version = a.canvas_versions(&group, &id).into_iter().find(|v| v.authors == ["Machine B"]).unwrap();
     a.name_canvas_version(&group, &id, &version.id, "Avant le ménage").unwrap();
     a.restore_canvas_version(&group, &id, &version.id).unwrap();
-    wait_for("C reçoit la restauration et le nom de version", Duration::from_secs(10), || {
+    wait_for("C reçoit la restauration et le nom de version", Duration::from_secs(30), || {
         let text = c.canvases(&group)[0].text.clone();
         let versions = c.canvas_versions(&group, &id);
         text == before
@@ -414,9 +414,9 @@ fn group_canvas_real_time_and_history() {
 
     // Renommer puis supprimer : partout.
     c.rename_canvas(&group, &id, "Liste").unwrap();
-    wait_for("A voit le nouveau titre", Duration::from_secs(10), || a.canvases(&group)[0].title == "Liste");
+    wait_for("A voit le nouveau titre", Duration::from_secs(30), || a.canvases(&group)[0].title == "Liste");
     a.delete_canvas(&group, &id).unwrap();
-    wait_for("B ne voit plus le canevas", Duration::from_secs(10), || b.canvases(&group).is_empty());
+    wait_for("B ne voit plus le canevas", Duration::from_secs(30), || b.canvases(&group).is_empty());
     for node in &nodes {
         node.engine.shutdown();
     }

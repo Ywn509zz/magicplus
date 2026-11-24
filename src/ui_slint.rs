@@ -130,6 +130,9 @@ fn refresh(ui: &AppWindow, snapshot: &Snapshot, first: bool) {
             snapshot.virtual_addresses.join("   ·   ")
         ));
     }
+    if !snapshot.bluetooth.is_empty() {
+        own.push_str(&format!("\n{}", snapshot.bluetooth));
+    }
     ui.set_own_addresses(own.into());
     let (firewall_state, firewall_error) = match &snapshot.firewall {
         magicplus_core::FirewallState::Ok | magicplus_core::FirewallState::Checking => (0, String::new()),

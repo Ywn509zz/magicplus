@@ -18,7 +18,7 @@
 
 use crate::{
     crypto,
-    engine::{explain_refusal, lock, read_ack, refusal, Engine, Inner, Target, ONLINE_WINDOW},
+    engine::{explain_refusal, lock, read_ack, refusal, Engine, Inner, Target},
     protocol::*,
     store::TrustedPeer,
     util::*,
@@ -967,13 +967,13 @@ impl Inner {
         }
         let peers = lock(&self.peers);
         let peer = peers.get(member_id)?;
-        if peer.last_seen.elapsed() >= ONLINE_WINDOW || peer.device.public_key != member.public_key {
+        if peer.device.public_key != member.public_key {
             return None;
         }
         Some(Target {
             id: member_id.to_string(),
             name: member.name.clone(),
-            address: std::net::SocketAddr::new(peer.ip, peer.tcp_port),
+            route: peer.route()?,
             public_key: crypto::public_from_b64(&member.public_key).ok()?,
         })
     }
@@ -1040,7 +1040,7 @@ impl Inner {
         if let Some(lamport) = read {
             self.write_message(&mut channel, &Message::ChatRead { conversation: conversation.to_string(), lamport }, &[])?;
         }
-        let _ = channel.get_ref().shutdown(std::net::Shutdown::Write);
+        let _ = channel.finish();
         match read_ack(&mut channel) {
             Some(ack) if ack.ok => {
                 if let Some(lamport) = read {
@@ -1435,12 +1435,16 @@ impl Engine {
         };
         for member in members {
             let Some(target) = self.inner.chat_target(conversation, &member) else { continue };
+            // « En train d'écrire » : pas en Bluetooth (une connexion lente, qui retarderait les messages).
+            if matches!(target.route, crate::engine::Route::Bluetooth(_)) {
+                continue;
+            }
             let inner = self.inner.clone();
             let conversation = conversation.to_string();
             thread::spawn(move || {
                 if let Ok(mut channel) = inner.connect(&target) {
                     let _ = inner.write_message(&mut channel, &Message::ChatTyping { conversation }, &[]);
-                    let _ = channel.get_ref().shutdown(std::net::Shutdown::Write);
+                    let _ = channel.finish();
                     let _ = read_ack(&mut channel);
                 }
             });
@@ -1450,7 +1454,7 @@ impl Engine {
     pub fn conversations(&self) -> Vec<ConversationView> {
         let online: HashSet<String> = lock(&self.inner.peers)
             .iter()
-            .filter(|(_, peer)| peer.last_seen.elapsed() < ONLINE_WINDOW)
+            .filter(|(_, peer)| peer.online())
             .map(|(id, _)| id.clone())
             .collect();
         let display = self.inner.display_names();

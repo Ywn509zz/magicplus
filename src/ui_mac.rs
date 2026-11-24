@@ -1346,6 +1346,9 @@ impl Controller {
                 snapshot.virtual_addresses.join("   ·   ")
             ));
         }
+        if !snapshot.bluetooth.is_empty() {
+            own.push_str(&format!("\n{}", snapshot.bluetooth));
+        }
         widgets.own_addresses.setStringValue(&ns(&own));
 
         let signature: String = snapshot

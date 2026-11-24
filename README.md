@@ -27,7 +27,7 @@ serveur, pas de compte, pas d'Internet. Application 100 % Rust.
 | Publier une version | Changer `version` dans `Cargo.toml`, valider, puis `git tag -a vX.Y.Z -m "notes"` et `git push origin main vX.Y.Z`. GitHub Actions (`.github/workflows/versions.yml`) compile Windows + macOS et crée la version ; les apps la proposent seules (`src/update.rs`). |
 | Langue | Textes de l'interface, messages et commentaires en **français**. |
 | Pourquoi AppKit sur Mac | Slint (OpenGL comme rendu logiciel) réagissait très lentement aux clics sur un Mac sans accélération Metal (MacBook Pro 2011 sous OpenCore Legacy Patcher), alors qu'AppKit y reste fluide. Ne pas remettre Slint ni SwiftUI sur macOS. |
-| Bluetooth | La découverte BLE est abandonnée (le Mac de 2011 n'a pas de BLE). Tout passe par le réseau local (Wi-Fi, Ethernet, adresse IP). Un transport Bluetooth classique (RFCOMM, sans BLE) reste une piste. |
+| Bluetooth | Pas de BLE (le Mac de 2011 n'en a pas). Réseau local d'abord (Wi-Fi, Ethernet, adresse IP) ; sans réseau commun, Bluetooth classique RFCOMM avec les ordinateurs appairés au système (`src/bluetooth/`), sous le même canal chiffré. |
 
 ---
 
@@ -155,7 +155,14 @@ cargo test
    « Lancer MagicPlus à l'ouverture de la session » (il démarre alors en arrière-plan, sans fenêtre)
    et notifications activées ou non. Sur Mac, la première fois, macOS demande d'autoriser les
    notifications (l'app doit être dans le dossier Applications).
-7. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
+7. **Sans réseau commun (Bluetooth)** : appairez une fois les deux ordinateurs dans les réglages
+   Bluetooth du système (Mac : Réglages Système → Bluetooth ; Windows : Paramètres → Bluetooth et
+   appareils → Ajouter un appareil), comme pour un casque. Ensuite, quand ils n'ont pas de réseau en
+   commun (pas de Wi-Fi, pas d'Internet, réseau qui isole les appareils), MagicPlus les relie tout seul
+   en Bluetooth : l'appareil apparaît « via Bluetooth » dans Appareils, et discussions, demandes d'ami,
+   presse-papiers et fichiers passent par là (plus lentement : environ 100 Ko/s). Il faut toujours
+   **associer** les appareils dans MagicPlus (empreintes), ou être dans un groupe commun.
+8. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
    « Paramètres » porte une pastille. **Paramètres → Mises à jour → Télécharger et installer**, puis
    **Redémarrer et installer** : MagicPlus se remplace et redémarre.
 
@@ -478,6 +485,29 @@ Comme sur Discord : photo de profil (fixe ou GIF animé), bannière (image ou co
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\MagicPlus`, Linux
   `~/.config/autostart/magicplus.desktop`. L'état est lu dans le système, pas dans les réglages.
 
+### Bluetooth — `src/bluetooth/`
+
+- **Pourquoi le Bluetooth classique (RFCOMM)** : c'est le seul moyen radio commun à tous les
+  ordinateurs visés, y compris les Mac de 2011 sans Bluetooth basse consommation ; il ne touche pas au
+  Wi-Fi (contrairement à un point d'accès ou au Wi-Fi Direct) et le pare-feu de Windows ne le filtre
+  pas. Portée d'une dizaine de mètres, débit d'environ 100 Ko/s.
+- **Sécurité** : le lien Bluetooth n'est qu'un tuyau. Au-dessus passe exactement le même canal
+  chiffré **Noise IK** qu'en TCP, avec les mêmes clés et la même association MagicPlus : un appareil
+  Bluetooth inconnu ne peut rien envoyer. L'appairage du système sert seulement à autoriser la liaison
+  radio.
+- **Service** : chaque MagicPlus publie un service RFCOMM (UUID `4d61d1c2-8f3e-4b6a-9c51-2b7e0a9d3f11`)
+  dans l'annuaire SDP. Mac : `IOBluetooth` sur un fil dédié qui fait tourner sa boucle d'exécution
+  (`bluetooth/mac.rs`) ; Windows : Winsock `AF_BTH` + `WSASetService` (`bluetooth/windows.rs`).
+- **Sondage** : toutes les 30 s, les ordinateurs appairés au système (classe « ordinateur ») qui ne
+  sont pas déjà joignables par le réseau sont contactés ; premier octet `H`, échange des annonces
+  `Hello` (u16 + JSON), fermeture. L'appareil est alors « en ligne via Bluetooth » 80 s. Un appareil
+  sans MagicPlus est réessayé de plus en plus rarement (1 à 10 min).
+- **Sessions** : premier octet `N`, puis le canal Noise. RFCOMM n'a pas de demi-fermeture : la fin
+  d'envoi est une trame Noise de longueur nulle (jamais un vrai message). Une seule connexion à la fois
+  vers un même appareil ; « en train d'écrire » ne passe pas par le Bluetooth.
+- **Choix du chemin** (`Discovered::route`) : réseau local s'il a annoncé depuis moins de 8 s, sinon
+  Bluetooth. Annonces et routes sont dans `engine.rs` (`Source`, `Route`), les liens dans `link.rs`.
+
 ### Stockage local
 
 Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlus` (Windows),
@@ -511,6 +541,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `src/chat.rs` | Discussions et groupes : événements numérotés, synchronisation, lectures, autocollants. |
 | `src/friends.rs` | Demandes d'ami entre membres d'un groupe : envoi, réponse, association. |
 | `src/firewall.rs` | Pare-feu Windows (vérification, autorisation en un clic) et cartes réseau virtuelles. |
+| `src/link.rs`, `src/bluetooth/` | Liens sous le canal chiffré (TCP, Bluetooth RFCOMM Mac/Windows), sondage des ordinateurs appairés. |
 | `src/autostart.rs` | Lancement à l'ouverture de la session (agent macOS, clé `Run` Windows, `.desktop` Linux). |
 | `src/ui_mac_system.rs`, `src/ui_slint/tray.rs` | Arrière-plan : icône (barre des menus, zone de notification), notifications du système. |
 | `src/markdown.rs` | Markdown des messages (analyse, texte brut, réécriture pour Slint). |
@@ -545,6 +576,7 @@ Dossier : `~/Library/Application Support/MagicPlus` (macOS), `%APPDATA%\MagicPlu
 | `MAGICPLUS_PORTS=46454,46455` | Autres ports d'annonce et de connexion : une copie lancée à côté de la vraie, invisible des appareils du réseau. |
 | `MAGICPLUS_FAKE_FIREWALL=1` | Affiche l'avertissement du pare-feu Windows (captures). |
 | `MAGICPLUS_TEST_NOTICE=1` | Une notification d'essai 3 s après le démarrage. |
+| `MAGICPLUS_NO_BLUETOOTH=1` | Pas de Bluetooth (copie de développement à côté de la vraie). |
 | `MAGICPLUS_START_PAGE=0..4` | macOS : ouvre directement une page (0 Appareils, 1 Discussions, 2 Presse-papiers, 3 Transferts, 4 Paramètres). `MAGICPLUS_START_CHAT=n` ouvre la n-ième conversation, `MAGICPLUS_START_CANVAS=1` (ou `historique`) ses canevas. |
 | `MAGICPLUS_SCREENSHOT_DIR=/dossier` | Slint : photographie chaque page (TGA) puis quitte. `MAGICPLUS_SCREENSHOT_PAGES=discussion,discussion-2` limite la série. |
 | `MAGICPLUS_DEMO_DIR=/dossier` | Avec `cargo test --test chat donnees_de_demo -- --ignored` : fabrique des discussions de démonstration. |
@@ -571,7 +603,9 @@ deux, utiliser deux machines, `MAGICPLUS_PORTS`, ou les tests `cargo test` qui u
 - Une connexion par fichier et par destinataire ; les fichiers d'un même lot partent en parallèle.
 - Discussions sans relais : un message attend que son destinataire et son auteur soient en ligne en
   même temps. Pas de recherche dans l'historique ; 300 derniers messages affichés par conversation.
-- Bluetooth classique (RFCOMM, sans BLE) prévu mais pas encore fait.
+- Bluetooth : il faut appairer les ordinateurs une fois dans les réglages du système ; pas de
+  Bluetooth sous Linux pour l'instant. Liaison radio vérifiée sur Mac (service publié), pas encore
+  entre deux vraies machines au moment de la 0.12.
 - Texte seulement pour le presse-papiers (pas d'images).
 - Si le réseau isole complètement les appareils entre eux (même en unicast), aucune connexion directe
   n'est possible : il faudrait un relais, contraire au principe « sans serveur ».

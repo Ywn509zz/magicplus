@@ -262,7 +262,7 @@ impl Engine {
                 thread::spawn(move || {
                     if let Ok(mut stream) = worker.connect(&target) {
                         let _ = worker.write_message(&mut stream, &Message::FileCancel { id }, &[]);
-                        let _ = stream.get_ref().shutdown(std::net::Shutdown::Write);
+                        let _ = stream.finish();
                     }
                 });
             }
@@ -596,7 +596,7 @@ impl Inner {
                 }
                 if let Some(limit) = self.cfg.fail_after_chunks {
                     if chunks_this_attempt == limit && !self.test_cut_done.swap(true, Ordering::SeqCst) {
-                        let _ = stream.get_ref().shutdown(std::net::Shutdown::Both);
+                        stream.get_ref().close();
                         return Err(pause("connexion coupée (test)"));
                     }
                 }
@@ -625,7 +625,7 @@ impl Inner {
             }
             self.write_message(&mut stream, &Message::FileComplete { id: job.id.clone() }, &[])
                 .map_err(|e| pause(format!("connexion interrompue ({e})")))?;
-            let _ = stream.get_ref().shutdown(std::net::Shutdown::Write);
+            let _ = stream.finish();
             Ok(())
         })();
 

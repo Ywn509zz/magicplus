@@ -559,7 +559,7 @@ impl Inner {
         let mut channel = self.connect(&target)?;
         let message = Message::CanvasSync { conversation: conversation.to_string(), canvas: typing, update: b64(&update), state: b64(&state) };
         self.write_message(&mut channel, &message, &[])?;
-        let _ = channel.get_ref().shutdown(std::net::Shutdown::Write);
+        let _ = channel.finish();
         let ack = read_ack(&mut channel).ok_or_else(|| anyhow!("{} ne répond pas", target.name))?;
         if !ack.ok {
             bail!("{}", explain_refusal(&ack, &target.name));

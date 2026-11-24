@@ -252,7 +252,7 @@ impl Inner {
         let (info, body) = lock(&self.profiles).outgoing()?;
         let mut channel = self.connect(target)?;
         self.write_message(&mut channel, &Message::Profile { profile: info.clone() }, &body)?;
-        let _ = channel.get_ref().shutdown(std::net::Shutdown::Write);
+        let _ = channel.finish();
         match read_ack(&mut channel) {
             Some(ack) if ack.ok => Ok(info.revision),
             Some(ack) => Err(anyhow!("{}", explain_refusal(&ack, &target.name))),

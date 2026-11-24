@@ -145,7 +145,7 @@ mod system {
         };
         let image = image::imageops::resize(&image.to_rgba8(), 32, 32, image::imageops::FilterType::Lanczos3);
         let color: Vec<u8> = image.pixels().flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
-        let mask = vec![0_u8; 32 * 32 / 8];
+        let mask = [0_u8; 32 * 32 / 8];
         // SAFETY : tampons de la bonne taille (32 × 32, 32 bits ; masque 1 bit), copiés par Windows.
         unsafe { CreateIcon(GetModuleHandleW(std::ptr::null()), 32, 32, 1, 32, mask.as_ptr(), color.as_ptr()) }
     }
