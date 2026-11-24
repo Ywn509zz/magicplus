@@ -567,6 +567,8 @@ impl Inner {
         let reply: SyncReply = serde_json::from_str(&ack.data).unwrap_or_default();
         let mut canvases = lock(&self.canvases);
         let space = canvases.space(conversation);
+        // Modifié ici pendant l'aller-retour : ces changements ne sont pas encore partis.
+        let local_unchanged = space.state() == state;
         let mut changed = false;
         if !reply.update.is_empty() {
             let update = Update::decode_v1(&unb64(&reply.update)?).context("mise à jour illisible")?;
@@ -580,8 +582,14 @@ impl Inner {
         if let Ok(state) = unb64(&reply.state) {
             space.known.insert(member.to_string(), state);
         }
-        let ours = space.state();
-        space.synced.insert(member.to_string(), ours);
+        if local_unchanged {
+            let ours = space.state();
+            space.synced.insert(member.to_string(), ours);
+        } else {
+            // Sinon on les croirait livrés et ils n'arriveraient qu'à la synchronisation complète
+            // suivante (30 s plus tard).
+            space.synced.remove(member);
+        }
         space.last_full.insert(member.to_string(), Instant::now());
         if changed {
             canvases.bump();

@@ -3,13 +3,24 @@
 Ce fichier est intégré à l'application : après une mise à jour, MagicPlus affiche les sections des
 versions installées depuis le dernier lancement. Une section par version, la plus récente en haut.
 
-## 0.13.0
+## 0.14.0
 
 - **Le bandeau d'information en bas de la fenêtre disparaît** après quelques secondes.
 - **La fenêtre peut être plus petite** : MagicPlus s'adapte aux petits écrans.
 - **Nouveautés après une mise à jour** : au premier lancement d'une nouvelle version, cette fenêtre résume ce qui a changé (Paramètres → Mises à jour → Voir les nouveautés).
 - **Photo et bannière recadrées, plus jamais étirées** : en choisissant une image, réglez le zoom et la partie à garder ; les GIF animés restent animés.
 - **Profil en grand**, comme sur Discord : cliquez sur la photo de quelqu'un puis « Profil complet » (ou bouton « Profil » dans Appareils) : grande bannière, photo, pseudo, pronoms, présentation, groupes en commun, et « Envoyer un message » ou « Ajouter en ami ».
+
+## 0.13.0
+
+- **Discussions façon Discord** : le texte n'est plus dans des bulles, et une réponse montre au-dessus du message la petite photo, le @nom et le début du message cité.
+- **Statut** : En ligne, Inactif, Ne pas déranger ou Invisible (cliquez sur votre nom en bas à gauche ; Mac : Paramètres → Statut et notifications). « Inactif » arrive tout seul quand l'ordinateur n'est plus utilisé.
+- **Notifications à votre goût** : discussions à deux, groupes (tout, ou seulement les @mentions), texte du message, son.
+- **Sélecteur d'émojis complet** (catégories, recherche, favoris, récents) et **émojis personnalisés**, même animés, partagés avec vos contacts (tapez :nom:).
+- **GIF** : bouton « GIF » pour chercher sur GIPHY, tendances et favoris (clé GIPHY gratuite à coller dans le bouton GIF).
+- Photos et bannières de profil animées (GIF ou PNG animé).
+- **14 thèmes de couleur** : Paramètres → Apparence.
+- Mettez à jour tous vos appareils : les versions précédentes ne se voient plus avec celle-ci.
 
 ## 0.12.0
 
