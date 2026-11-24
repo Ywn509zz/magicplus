@@ -28,7 +28,7 @@ mod system {
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Shell::{
-                Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_USER, NIM_ADD,
+                Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_NOSOUND, NIIF_USER, NIM_ADD,
                 NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONUSERCLICK, NIN_SELECT, NOTIFYICONDATAW,
                 NOTIFYICON_VERSION_4,
             },
@@ -190,12 +190,12 @@ mod system {
         }
 
         /// Notification du système (bulle de l'icône).
-        pub fn notify(&self, title: &str, body: &str) {
+        pub fn notify(&self, title: &str, body: &str, silent: bool) {
             let mut data = base_data();
             data.uFlags = NIF_INFO;
             copy_into(&mut data.szInfoTitle, title);
             copy_into(&mut data.szInfo, if body.is_empty() { " " } else { body });
-            data.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+            data.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | if silent { NIIF_NOSOUND } else { 0 };
             data.hBalloonIcon = ICON.load(Ordering::SeqCst) as HICON;
             // SAFETY : `data` est complète et vit pendant l'appel.
             unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
@@ -275,7 +275,7 @@ mod system {
             None
         }
 
-        pub fn notify(&self, _title: &str, _body: &str) {}
+        pub fn notify(&self, _title: &str, _body: &str, _silent: bool) {}
 
         pub fn take_events(&self) -> Vec<TrayEvent> {
             Vec::new()

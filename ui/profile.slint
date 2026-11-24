@@ -1,7 +1,7 @@
 // Profils, comme sur Discord : photo ronde, bannière (image ou couleur), pronoms, « À propos ».
 
 import { Button } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, Anim } from "theme.slint";
 import { MarkdownView, BlockItem } from "markdown.slint";
 
 export struct ProfileItem {
@@ -11,14 +11,60 @@ export struct ProfileItem {
     bio: [BlockItem],
     has-bio: bool,
     banner: image,
+    banner-frames: [image],
+    banner-frame-ms: int,
     has-banner: bool,
     banner-color: color,
     photo: image,
+    photo-frames: [image],
+    photo-frame-ms: int,
     has-photo: bool,
     initials: string,
     color: color,
     me: bool,
     can-chat: bool,
+}
+
+// Pastille de présence, comme Discord : verte (en ligne), lune jaune (inactif), rouge barrée
+// (ne pas déranger), anneau gris (hors ligne ou invisible).
+export component PresenceDot inherits Rectangle {
+    in property <int> presence;
+    in property <length> size: 12px;
+    in property <color> ring: Theme.list-bg;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: root.ring;
+
+    Rectangle {
+        width: root.size - 5px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.presence == 1 ? #23a55a : root.presence == 2 ? #f0b232 : root.presence == 3 ? #f23f43 : #80848e;
+    }
+    // Inactif : lune (un disque de la couleur du fond mange le coin).
+    if root.presence == 2: Rectangle {
+        x: root.size * 0.18;
+        y: root.size * 0.18;
+        width: (root.size - 5px) * 0.62;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.ring;
+    }
+    // Ne pas déranger : trait blanc.
+    if root.presence == 3: Rectangle {
+        width: (root.size - 5px) * 0.6;
+        height: Math.max(1.5px, (root.size - 5px) * 0.22);
+        border-radius: self.height / 2;
+        background: root.ring;
+    }
+    // Hors ligne : anneau.
+    if root.presence == 0: Rectangle {
+        width: (root.size - 5px) * 0.45;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.ring;
+    }
 }
 
 // Photo de profil ronde, ou pastille colorée avec les initiales.
@@ -28,8 +74,16 @@ export component Avatar inherits Rectangle {
     in property <length> size: 38px;
     in property <image> photo;
     in property <bool> has-photo;
+    // Photo animée (GIF) : ses images, et si elle s'anime maintenant (dans les messages,
+    // seulement au survol, comme Discord).
+    in property <[image]> frames;
+    in property <int> frame-ms: 100;
+    in property <bool> animate: true;
     in property <bool> show-presence;
     in property <bool> online;
+    // Présence : -1 d'après `online` ; 0 hors ligne, 1 en ligne, 2 inactif, 3 ne pas déranger.
+    in property <int> presence: -1;
+    property <int> shown-presence: root.presence >= 0 ? root.presence : root.online ? 1 : 0;
     in property <color> ring: Theme.list-bg;
     width: root.size;
     height: root.size;
@@ -52,22 +106,19 @@ export component Avatar inherits Rectangle {
             vertical-alignment: center;
         }
         if root.has-photo: Image {
-            source: root.photo;
+            source: root.animate && root.frames.length > 1 ? root.frames[Math.mod(Math.floor(Anim.tick * 50 / Math.max(root.frame-ms, 20)), root.frames.length)] : root.photo;
             width: parent.width;
             height: parent.height;
             image-fit: cover;
         }
     }
 
-    if root.show-presence: Rectangle {
-        width: root.size * 0.36;
-        height: self.width;
+    if root.show-presence: PresenceDot {
+        size: root.size * 0.36;
         x: parent.width - self.width + 1px;
         y: parent.height - self.height + 1px;
-        border-radius: self.width / 2;
-        background: root.online ? Theme.success : Theme.neutral;
-        border-width: 2.5px;
-        border-color: root.ring;
+        presence: root.shown-presence;
+        ring: root.ring;
     }
 }
 
@@ -96,7 +147,7 @@ export component ProfileCard inherits Rectangle {
                 background: root.profile.banner-color;
                 clip: true;
                 if root.profile.has-banner: Image {
-                    source: root.profile.banner;
+                    source: root.profile.banner-frames.length > 1 ? root.profile.banner-frames[Math.mod(Math.floor(Anim.tick * 50 / Math.max(root.profile.banner-frame-ms, 20)), root.profile.banner-frames.length)] : root.profile.banner;
                     width: parent.width;
                     height: parent.height;
                     image-fit: cover;
@@ -118,6 +169,8 @@ export component ProfileCard inherits Rectangle {
                     tint: root.profile.color;
                     photo: root.profile.photo;
                     has-photo: root.profile.has-photo;
+                    frames: root.profile.photo-frames;
+                    frame-ms: root.profile.photo-frame-ms;
                 }
             }
         }

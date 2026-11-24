@@ -11,6 +11,7 @@
 use crate::{
     chat::{valid_name, SenderInfo},
     engine::{explain_refusal, lock, read_ack, Engine, Inner, Target},
+    emoji::{CustomEmojiView, EmojiInfo},
     protocol::{ImageInfo, Message, ProfileInfo},
     util::now_ms,
 };
@@ -30,19 +31,24 @@ pub const MAX_PRONOUNS: usize = 40;
 const AVATAR_SIZE: u32 = 256;
 /// Bannière au format 5:2, comme sur Discord.
 const BANNER_SIZE: (u32, u32) = (960, 384);
-/// Un GIF animé plus lourd est réduit à une image fixe.
+/// Un GIF animé plus lourd est réencodé plus petit (voir `shrink_animation`).
 const MAX_GIF_AVATAR: usize = 1_500_000;
 const MAX_GIF_BANNER: usize = 2_400_000;
+/// Taille d'une photo ou bannière animée réencodée (plus petite qu'une image fixe : un GIF
+/// garde toutes ses images).
+const ANIMATED_AVATAR_SIZE: (u32, u32) = (160, 160);
+const ANIMATED_BANNER_SIZE: (u32, u32) = (600, 240);
 const MAX_IMAGE_BYTES: u64 = 3 * 1024 * 1024;
 /// Image choisie avant recadrage (un GIF peut être lourd).
 const MAX_SOURCE_BYTES: u64 = 40 * 1024 * 1024;
-/// Taille d'un GIF animé recadré (plus petite : chaque image du GIF compte).
-const GIF_AVATAR_SIZE: u32 = 192;
-const GIF_BANNER_SIZE: (u32, u32) = (600, 240);
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 const RETRY_AFTER_REFUSAL: Duration = Duration::from_secs(300);
 
 const MINE_DIR: &str = "profil";
+/// Émojis personnalisés, dans le dossier de chaque profil.
+const EMOJIS_DIR: &str = "emojis";
+/// Récents et favoris du sélecteur d'émojis (sur cet appareil).
+const EMOJI_PREFS: &str = "emojis.json";
 const OTHERS_DIR: &str = "profils";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,12 +168,19 @@ pub(crate) struct ProfileStore {
     syncing: HashSet<String>,
     retry: HashMap<String, Instant>,
     revision: u64,
+    /// Contacts dont des images d'émojis manquent, et quand les redemander.
+    emojis_wanted: HashMap<String, Instant>,
+    emojis_fetching: HashSet<String>,
 }
 
 fn image_path(dir: &Path, kind: ProfileImage, info: &Option<ImageInfo>) -> Option<PathBuf> {
     let info = info.as_ref()?;
     let path = dir.join(format!("{}.{}", kind.stem(), info.ext));
     path.is_file().then_some(path)
+}
+
+fn emoji_path(profile_dir: &Path, emoji: &EmojiInfo) -> PathBuf {
+    profile_dir.join(EMOJIS_DIR).join(format!("{}.{}", emoji.id, emoji.ext))
 }
 
 fn allowed_ext(ext: &str) -> bool {
@@ -191,7 +204,27 @@ impl ProfileStore {
                 }
             }
         }
-        Self { dir: data_dir.to_path_buf(), mine, others, sent, syncing: HashSet::new(), retry: HashMap::new(), revision: 1 }
+        let mut store = Self {
+            dir: data_dir.to_path_buf(),
+            mine,
+            others,
+            sent,
+            syncing: HashSet::new(),
+            retry: HashMap::new(),
+            revision: 1,
+            emojis_wanted: HashMap::new(),
+            emojis_fetching: HashSet::new(),
+        };
+        let now = Instant::now();
+        let wanted: Vec<String> = store.others.keys().filter(|id| !store.missing_emojis(id).is_empty()).cloned().collect();
+        store.emojis_wanted.extend(wanted.into_iter().map(|id| (id, now)));
+        store
+    }
+
+    /// Émojis d'un contact dont l'image n'est pas encore là.
+    fn missing_emojis(&self, id: &str) -> Vec<EmojiInfo> {
+        let dir = self.other_dir(id);
+        self.others.get(id).map(|info| info.emojis.iter().filter(|e| !emoji_path(&dir, e).is_file()).cloned().collect()).unwrap_or_default()
     }
 
     fn mine_dir(&self) -> PathBuf {
@@ -239,7 +272,7 @@ impl ProfileStore {
         }
     }
 
-    /// Notre profil et ses images, prêts à envoyer.
+    /// Notre profil et ses images (photo puis bannière), prêts à envoyer.
     fn outgoing(&self) -> Result<(ProfileInfo, Vec<u8>)> {
         let mut body = Vec::new();
         for (kind, info) in [(ProfileImage::Avatar, &self.mine.avatar), (ProfileImage::Banner, &self.mine.banner)] {
@@ -251,12 +284,41 @@ impl ProfileStore {
         }
         Ok((self.mine.clone(), body))
     }
+
+    /// Émojis personnalisés connus : les nôtres, puis ceux de nos contacts (`owner` : identifiant
+    /// du contact, remplacé par son nom par l'appelant, hors verrou).
+    fn custom_emojis(&self) -> Vec<CustomEmojiView> {
+        let mut all = Vec::new();
+        let mut add = |info: &ProfileInfo, dir: PathBuf, mine: bool, owner: String| {
+            for emoji in &info.emojis {
+                let path = emoji_path(&dir, emoji);
+                if path.is_file() {
+                    all.push(CustomEmojiView {
+                        id: emoji.id.clone(),
+                        name: emoji.name.clone(),
+                        path,
+                        animated: emoji.ext == "gif",
+                        mine,
+                        owner: owner.clone(),
+                    });
+                }
+            }
+        };
+        add(&self.mine, self.mine_dir(), true, String::new());
+        let mut others: Vec<_> = self.others.iter().collect();
+        others.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, info) in others {
+            add(info, self.other_dir(id), false, id.clone());
+        }
+        all
+    }
 }
 
 // ------------------------------------------------------------------ images
 
 /// Prépare une image choisie par l'utilisateur : recadrée (cadre `crop`) puis réduite (photo carrée
-/// 256 px, bannière 960 × 384). Un GIF animé est recadré image par image et reste animé.
+/// 256 px, bannière 960 × 384). Une animation (GIF ou PNG animé) est recadrée image par image et
+/// reste animée, en GIF.
 fn prepare_image(source: &Path, kind: ProfileImage, crop: Crop) -> Result<(Vec<u8>, &'static str)> {
     use image::{imageops::FilterType, ImageFormat, ImageReader};
     let bytes = fs::read(source).with_context(|| format!("« {} » est illisible", source.display()))?;
@@ -265,13 +327,31 @@ fn prepare_image(source: &Path, kind: ProfileImage, crop: Crop) -> Result<(Vec<u
     }
     let reader = ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()?;
     let format = reader.format().ok_or_else(|| anyhow!("ce fichier n'est pas une image reconnue"))?;
-    if format == ImageFormat::Gif && is_animated_gif(&bytes) {
-        let gif = crop_gif(&bytes, kind, crop)?;
-        let limit = if kind == ProfileImage::Avatar { MAX_GIF_AVATAR } else { MAX_GIF_BANNER };
-        if gif.len() <= limit {
+    let gif_limit = if kind == ProfileImage::Avatar { MAX_GIF_AVATAR } else { MAX_GIF_BANNER };
+    if let Some(frames) = crate::animation::frames(&bytes) {
+        // Animation (GIF ou PNG animé) : gardée animée, en GIF, le format que tous les
+        // appareils affichent. Un GIF déjà léger, pas trop grand et pas recadré est gardé tel quel.
+        let (w, h) = (frames[0].image.width(), frames[0].image.height());
+        let (target_w, target_h) = match kind {
+            ProfileImage::Avatar => ANIMATED_AVATAR_SIZE,
+            ProfileImage::Banner => ANIMATED_BANNER_SIZE,
+        };
+        if crop == Crop::default() && format == ImageFormat::Gif && bytes.len() <= gif_limit && w <= target_w * 2 && h <= target_h * 2 {
+            return Ok((bytes, "gif"));
+        }
+        // Même cadre pour toutes les images de l'animation.
+        let (x, y, cw, ch) = crop_rect(w, h, kind, crop);
+        let cropped: Vec<crate::animation::AnimFrame> = frames
+            .iter()
+            .map(|frame| crate::animation::AnimFrame {
+                image: image::imageops::crop_imm(&frame.image, x, y, cw, ch).to_image(),
+                delay_ms: frame.delay_ms,
+            })
+            .collect();
+        if let Some(gif) = shrink_animation(&cropped, (target_w, target_h), gif_limit) {
             return Ok((gif, "gif"));
         }
-        // Trop lourd même recadré : on garde la première image.
+        // Vraiment trop lourde : première image seulement (ci-dessous).
     }
     let image = reader.decode().context("image illisible")?;
     let (target_w, target_h) = match kind {
@@ -295,39 +375,21 @@ fn prepare_image(source: &Path, kind: ProfileImage, crop: Crop) -> Result<(Vec<u
     Ok((out.into_inner(), ext))
 }
 
-fn is_animated_gif(bytes: &[u8]) -> bool {
-    use image::AnimationDecoder;
-    image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-        .map(|decoder| decoder.into_frames().take(2).count() > 1)
-        .unwrap_or(false)
-}
-
-/// Recadre chaque image d'un GIF animé (même cadre pour toutes), réduit, réencode.
-fn crop_gif(bytes: &[u8], kind: ProfileImage, crop: Crop) -> Result<Vec<u8>> {
-    use image::{
-        codecs::gif::{GifDecoder, GifEncoder, Repeat},
-        imageops::FilterType,
-        AnimationDecoder, Frame,
-    };
-    let frames = GifDecoder::new(std::io::Cursor::new(bytes))?.into_frames().collect_frames().context("GIF illisible")?;
-    let first = frames.first().ok_or_else(|| anyhow!("GIF vide"))?;
-    let (x, y, w, h) = crop_rect(first.buffer().width(), first.buffer().height(), kind, crop);
-    let (target_w, target_h) = match kind {
-        ProfileImage::Avatar => (GIF_AVATAR_SIZE, GIF_AVATAR_SIZE),
-        ProfileImage::Banner => GIF_BANNER_SIZE,
-    };
-    let mut out = Vec::new();
-    {
-        let mut encoder = GifEncoder::new_with_speed(&mut out, 20);
-        encoder.set_repeat(Repeat::Infinite)?;
-        for frame in frames.into_iter().take(300) {
-            let delay = frame.delay();
-            let part = image::imageops::crop_imm(frame.buffer(), x, y, w, h).to_image();
-            let part = if w > target_w { image::imageops::resize(&part, target_w, target_h, FilterType::Triangle) } else { part };
-            encoder.encode_frame(Frame::from_parts(part, 0, 0, delay))?;
+/// Réencode une animation en GIF de taille `size` (ou plus petit) qui tient dans `limit` octets :
+/// on réduit d'abord le nombre d'images, puis la taille. `None` si rien ne tient.
+fn shrink_animation(frames: &[crate::animation::AnimFrame], (w, h): (u32, u32), limit: usize) -> Option<Vec<u8>> {
+    // Au plus ~120 images (une sur deux, trois… au-delà).
+    let base_step = frames.len().div_ceil(120).max(1);
+    for scale in [1.0, 0.75, 0.5] {
+        let (sw, sh) = (((w as f64) * scale) as u32, ((h as f64) * scale) as u32);
+        for step in [base_step, base_step * 2, base_step * 3] {
+            let Ok(gif) = crate::animation::encode_gif(frames, sw.max(16), sh.max(16), step) else { return None };
+            if gif.len() <= limit {
+                return Some(gif);
+            }
         }
     }
-    Ok(out)
+    None
 }
 
 fn sha_b64(bytes: &[u8]) -> String {
@@ -398,6 +460,16 @@ impl Inner {
         if total != body.len() as u64 || images.iter().any(|(_, image)| image.size > MAX_IMAGE_BYTES || !allowed_ext(&image.ext)) {
             bail!("images de profil invalides");
         }
+        if info.emojis.len() > crate::emoji::MAX_CUSTOM
+            || info.emojis.iter().any(|e| {
+                e.size > crate::emoji::MAX_CUSTOM_BYTES as u64
+                    || !crate::emoji::valid_name(&e.name)
+                    || !crate::emoji::valid_id(&e.id)
+                    || !matches!(e.ext.as_str(), "png" | "gif")
+            })
+        {
+            bail!("émojis de profil invalides");
+        }
         let mut profiles = lock(&self.profiles);
         if profiles.others.get(&sender.id).is_some_and(|known| known.revision >= info.revision) {
             return Ok(()); // déjà à jour
@@ -417,6 +489,16 @@ impl Inner {
             fs::write(&temporary, bytes)?;
             fs::rename(&temporary, &path)?;
         }
+        let emojis_dir = dir.join(EMOJIS_DIR);
+        // Retire les émojis qu'il n'a plus.
+        if let Ok(entries) = fs::read_dir(&emojis_dir) {
+            for entry in entries.flatten() {
+                let keep = info.emojis.iter().any(|e| entry.file_name().to_string_lossy() == format!("{}.{}", e.id, e.ext));
+                if !keep {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         // Retire les anciennes images (autre format ou supprimées).
         for kind in [ProfileImage::Avatar, ProfileImage::Banner] {
             let keep = images.iter().find(|(k, _)| *k == kind).map(|(_, image)| image.ext.clone());
@@ -429,10 +511,39 @@ impl Inner {
         ProfileStore::save_json(&dir.join("profil.json"), &info)?;
         profiles.others.insert(sender.id.clone(), info);
         profiles.revision += 1;
+        if !profiles.missing_emojis(&sender.id).is_empty() {
+            profiles.emojis_wanted.insert(sender.id.clone(), Instant::now());
+        }
         drop(profiles);
         self.chat_changed();
         self.touch();
         Ok(())
+    }
+
+    fn fetch_emoji(&self, target: &Target, emoji: &EmojiInfo) -> Result<Vec<u8>> {
+        use base64::Engine as _;
+        let mut channel = self.connect(target)?;
+        self.write_message(&mut channel, &Message::EmojiFetch { id: emoji.id.clone() }, &[])?;
+        let _ = channel.finish();
+        let ack = read_ack(&mut channel).ok_or_else(|| anyhow!("{} ne répond pas", target.name))?;
+        if !ack.ok {
+            bail!("{}", explain_refusal(&ack, &target.name));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(ack.data.as_bytes()).context("réponse illisible")?;
+        crate::emoji::check_received(emoji, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// Image d'un de nos émojis, pour un contact (appareil associé ou membre d'un de nos groupes).
+    pub(crate) fn serve_emoji(&self, sender: &SenderInfo, id: &str) -> Result<String> {
+        use base64::Engine as _;
+        if !self.profile_targets().iter().any(|(contact, _)| *contact == sender.id) {
+            bail!("émojis réservés aux contacts");
+        }
+        let profiles = lock(&self.profiles);
+        let emoji = profiles.mine.emojis.iter().find(|e| e.id == id).ok_or_else(|| anyhow!("émoji inconnu"))?;
+        let bytes = fs::read(emoji_path(&profiles.mine_dir(), emoji))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
     fn profile_changed(&self) {
@@ -442,10 +553,68 @@ impl Inner {
     }
 }
 
+/// Demande à `owner` les images de ses émojis qui nous manquent ; redemande plus tard en cas
+/// d'échec.
+fn fetch_missing_emojis(inner: &Arc<Inner>, owner: &str) {
+    let (dir, missing) = {
+        let profiles = lock(&inner.profiles);
+        (profiles.other_dir(owner), profiles.missing_emojis(owner))
+    };
+    let conversation = inner.profile_targets().into_iter().find(|(id, _)| id == owner).and_then(|(_, c)| c);
+    let target = inner.resolve_profile_target(owner, conversation.as_deref());
+    let mut fetched = false;
+    let mut failed = target.is_none();
+    if let Some(target) = target {
+        let _ = fs::create_dir_all(dir.join(EMOJIS_DIR));
+        for emoji in missing {
+            let saved = inner.fetch_emoji(&target, &emoji).and_then(|bytes| {
+                let path = emoji_path(&dir, &emoji);
+                let temporary = path.with_extension("tmp");
+                fs::write(&temporary, &bytes)?;
+                fs::rename(&temporary, &path)?;
+                Ok(())
+            });
+            match saved {
+                Ok(()) => fetched = true,
+                Err(error) => {
+                    eprintln!("[profils] émoji « {} » de {} : {error}", emoji.name, target.name);
+                    failed = true;
+                }
+            }
+        }
+    }
+    let mut profiles = lock(&inner.profiles);
+    profiles.emojis_fetching.remove(owner);
+    if failed {
+        profiles.emojis_wanted.insert(owner.to_string(), Instant::now() + RETRY_AFTER);
+    }
+    if fetched {
+        profiles.revision += 1;
+        drop(profiles);
+        inner.chat_changed();
+        inner.touch();
+    }
+}
+
 pub(crate) fn spawn_profile_scheduler(inner: Arc<Inner>) {
     thread::spawn(move || {
         while !inner.shutdown.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_secs(2));
+            // Images d'émojis de contacts à demander.
+            let due: Vec<String> = {
+                let mut profiles = lock(&inner.profiles);
+                let now = Instant::now();
+                let due: Vec<String> = profiles.emojis_wanted.iter().filter(|(_, at)| **at <= now).map(|(id, _)| id.clone()).collect();
+                for id in &due {
+                    profiles.emojis_wanted.remove(id);
+                    profiles.emojis_fetching.insert(id.clone());
+                }
+                due
+            };
+            for owner in due {
+                let worker = inner.clone();
+                thread::spawn(move || fetch_missing_emojis(&worker, &owner));
+            }
             let revision = lock(&inner.profiles).mine.revision;
             if revision == 0 {
                 continue; // jamais rempli : rien à diffuser
@@ -565,7 +734,7 @@ impl Engine {
         })
     }
 
-    /// Nouvelle photo de profil ou bannière, à partir d'une image (PNG, JPEG, GIF, WebP, BMP),
+    /// Nouvelle photo de profil ou bannière, à partir d'une image (PNG, JPEG, GIF, BMP),
     /// recadrée au centre.
     pub fn set_profile_image(&self, kind: ProfileImage, source: &Path) -> Result<()> {
         self.set_profile_image_cropped(kind, source, Crop::default())
@@ -593,6 +762,93 @@ impl Engine {
         }
         self.inner.profile_changed();
         Ok(())
+    }
+
+    // ------------------------------------------------------------ émojis
+
+    /// Émojis personnalisés utilisables : les nôtres puis ceux de nos contacts.
+    pub fn custom_emojis(&self) -> Vec<CustomEmojiView> {
+        let mut all = lock(&self.inner.profiles).custom_emojis();
+        for emoji in all.iter_mut().filter(|e| !e.mine) {
+            emoji.owner = self.inner.display_name(&emoji.owner).unwrap_or_default();
+        }
+        all
+    }
+
+    /// Émoji personnalisé d'après son identifiant (le nôtre ou celui d'un contact).
+    pub fn custom_emoji(&self, id: &str) -> Option<CustomEmojiView> {
+        self.custom_emojis().into_iter().find(|e| e.id == id)
+    }
+
+    /// Nouvel émoji personnalisé à partir d'une image (fixe ou animée). Le nom est tiré du
+    /// fichier s'il n'est pas donné, et rendu unique parmi les nôtres.
+    pub fn add_custom_emoji(&self, source: &Path, name: Option<&str>) -> Result<CustomEmojiView> {
+        let (bytes, ext) = crate::emoji::prepare(source)?;
+        let id = crate::emoji::id_of(&bytes);
+        let mut base = name.map(str::to_string).unwrap_or_else(|| crate::emoji::name_from_file(source));
+        if !crate::emoji::valid_name(&base) {
+            bail!("nom d'émoji invalide : 2 à 32 lettres sans accent, chiffres ou _");
+        }
+        {
+            let mut profiles = lock(&self.inner.profiles);
+            if profiles.mine.emojis.iter().any(|e| e.id == id) {
+                bail!("cet émoji existe déjà");
+            }
+            if profiles.mine.emojis.len() >= crate::emoji::MAX_CUSTOM {
+                bail!("{} émojis personnalisés au plus", crate::emoji::MAX_CUSTOM);
+            }
+            let mut n = 2;
+            let original = base.clone();
+            while profiles.mine.emojis.iter().any(|e| e.name == base) {
+                base = format!("{}_{n}", &original[..original.len().min(29)]);
+                n += 1;
+            }
+            let info = EmojiInfo { name: base, id, ext: ext.to_string(), size: bytes.len() as u64 };
+            let path = emoji_path(&profiles.mine_dir(), &info);
+            fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+            fs::write(&path, &bytes)?;
+            profiles.mine.emojis.push(info);
+            profiles.mine.revision = now_ms().max(profiles.mine.revision + 1);
+            profiles.save_mine()?;
+        }
+        self.inner.profile_changed();
+        let added = lock(&self.inner.profiles).mine.emojis.last().cloned();
+        let added = added.ok_or_else(|| anyhow!("émoji introuvable"))?;
+        self.custom_emoji(&added.id).ok_or_else(|| anyhow!("émoji introuvable"))
+    }
+
+    /// Retire un de nos émojis personnalisés (les messages qui l'utilisent montreront :nom:).
+    pub fn remove_custom_emoji(&self, id: &str) -> Result<()> {
+        {
+            let mut profiles = lock(&self.inner.profiles);
+            let Some(index) = profiles.mine.emojis.iter().position(|e| e.id == id) else { bail!("émoji inconnu") };
+            let info = profiles.mine.emojis.remove(index);
+            let _ = fs::remove_file(emoji_path(&profiles.mine_dir(), &info));
+            profiles.mine.revision = now_ms().max(profiles.mine.revision + 1);
+            profiles.save_mine()?;
+        }
+        self.inner.profile_changed();
+        Ok(())
+    }
+
+    /// Émojis récents et favoris de cet appareil.
+    pub fn emoji_prefs(&self) -> crate::emoji::EmojiPrefs {
+        self.inner.store.load(EMOJI_PREFS).unwrap_or_default()
+    }
+
+    /// Un émoji vient d'être choisi (envoyé ou ajouté en réaction) : il passe en tête des récents.
+    pub fn note_emoji_used(&self, emoji: &str) {
+        let mut prefs = self.emoji_prefs();
+        prefs.used(emoji);
+        let _ = self.inner.store.save(EMOJI_PREFS, &prefs);
+    }
+
+    /// Ajoute aux favoris ou en retire ; vrai s'il en fait partie ensuite.
+    pub fn toggle_favorite_emoji(&self, emoji: &str) -> bool {
+        let mut prefs = self.emoji_prefs();
+        let favorite = prefs.toggle_favorite(emoji);
+        let _ = self.inner.store.save(EMOJI_PREFS, &prefs);
+        favorite
     }
 
     pub fn remove_profile_image(&self, kind: ProfileImage) -> Result<()> {
@@ -657,11 +913,11 @@ mod tests {
                 encoder.encode_frame(Frame::from_parts(frame, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
             }
         }
-        let (gif, ext) = prepare_image(&gif_path, ProfileImage::Banner, Crop::default()).unwrap();
+        let (gif, ext) = prepare_image(&gif_path, ProfileImage::Banner, Crop { zoom: 1.0, x: 0.0, y: 0.0 }).unwrap();
         assert_eq!(ext, "gif");
-        assert!(is_animated_gif(&gif));
+        assert!(crate::animation::frames(&gif).is_some_and(|frames| frames.len() > 1));
         let decoded = image::load_from_memory(&gif).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (400, 160));
+        assert_eq!((decoded.width(), decoded.height()), (600, 240));
         let _ = fs::remove_dir_all(&dir);
     }
 }

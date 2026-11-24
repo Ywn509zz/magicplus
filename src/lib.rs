@@ -1,18 +1,22 @@
 //! Cœur de MagicPlus : réseau local, chiffrement, presse-papiers et transferts de fichiers.
 
+pub mod animation;
 pub mod autostart;
 mod bluetooth;
 pub mod canvas;
 pub mod changelog;
 pub mod chat;
 pub mod crypto;
+pub mod emoji;
 pub mod engine;
+pub mod giphy;
 pub mod firewall;
 pub mod friends;
 pub mod highlight;
 pub mod markdown;
 mod link;
 mod net;
+pub mod presence;
 pub mod profile;
 pub mod protocol;
 mod secure;
@@ -27,6 +31,9 @@ pub use chat::{
 };
 pub use protocol::AttachmentKind;
 pub use canvas::{CanvasVersionView, CanvasView};
+pub use emoji::{CustomEmojiView, EmojiPrefs};
+pub use giphy::GifResult;
+pub use presence::{GroupNotifications, NotificationPrefs, Presence};
 pub use profile::{Crop, CropSource, ProfileDetails, ProfileImage, ProfileView};
 pub use update::{UpdateState, UpdateView};
 pub use changelog::WhatsNew;

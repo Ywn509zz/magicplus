@@ -103,16 +103,19 @@ fn spawn_udp_broadcaster(inner: Arc<Inner>) {
     thread::spawn(move || {
         let mut warned = false;
         while !inner.shutdown.load(Ordering::SeqCst) {
-            // Relu à chaque tour : le nom de l'appareil peut changer.
-            let Ok(encoded) = serde_json::to_vec(&inner.hello(false)) else {
-                return;
-            };
             let port = inner.cfg.discovery_port;
             let mut sent = 0;
+
+            // Tout ce qui est lent (liste des interfaces, sockets, résolution des adresses
+            // saisies) est préparé AVANT de lire l'annonce. Sinon, un renommage pendant ce temps
+            // (plusieurs millisecondes sous Windows, avec ses interfaces Hyper-V, WSL ou Docker)
+            // ferait partir l'ancien nom après une réponse portant le nouveau : les autres
+            // appareils réafficheraient l'ancien nom jusqu'au tour suivant.
 
             // Un socket par interface, lié à son adresse : l'annonce part par cette interface
             // (un socket unique n'utilise que la route par défaut, souvent le mauvais réseau
             // sous Windows avec VPN, Hyper-V ou WSL). La liste est relue pour suivre le Wi-Fi.
+            let mut per_interface = Vec::new();
             if let Ok(interfaces) = if_addrs::get_if_addrs() {
                 for interface in interfaces {
                     if interface.is_loopback() {
@@ -133,15 +136,30 @@ fn spawn_udp_broadcaster(inner: Arc<Inner>) {
                     if socket.set_broadcast(true).is_err() {
                         continue;
                     }
-                    let mut delivered = false;
-                    for target in [subnet, Ipv4Addr::BROADCAST] {
-                        if target != address.ip && socket.send_to(&encoded, (target, port)).is_ok() {
-                            delivered = true;
-                        }
+                    per_interface.push((socket, address.ip, subnet));
+                }
+            }
+
+            // Adresses saisies par l'utilisateur (réseau qui bloque la diffusion, autre
+            // sous-réseau) et adresses de test : annonce envoyée directement à chacune.
+            let mut direct = inner.cfg.extra_targets.clone();
+            direct.extend(inner.manual_targets());
+            let direct_socket = if direct.is_empty() { None } else { UdpSocket::bind(("0.0.0.0", 0)).ok() };
+
+            // Relu à chaque tour, juste avant d'envoyer : le nom de l'appareil peut changer.
+            let Ok(encoded) = serde_json::to_vec(&inner.hello(false)) else {
+                return;
+            };
+
+            for (socket, ip, subnet) in &per_interface {
+                let mut delivered = false;
+                for target in [*subnet, Ipv4Addr::BROADCAST] {
+                    if target != *ip && socket.send_to(&encoded, (target, port)).is_ok() {
+                        delivered = true;
                     }
-                    if delivered {
-                        sent += 1;
-                    }
+                }
+                if delivered {
+                    sent += 1;
                 }
             }
 
@@ -155,16 +173,10 @@ fn spawn_udp_broadcaster(inner: Arc<Inner>) {
                 }
             }
 
-            // Adresses saisies par l'utilisateur (réseau qui bloque la diffusion, autre
-            // sous-réseau) et adresses de test : annonce envoyée directement à chacune.
-            let mut direct = inner.cfg.extra_targets.clone();
-            direct.extend(inner.manual_targets());
-            if !direct.is_empty() {
-                if let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) {
-                    for target in &direct {
-                        if socket.send_to(&encoded, target).is_ok() {
-                            sent += 1;
-                        }
+            if let Some(socket) = &direct_socket {
+                for target in &direct {
+                    if socket.send_to(&encoded, target).is_ok() {
+                        sent += 1;
                     }
                 }
             }

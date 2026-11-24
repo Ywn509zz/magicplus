@@ -14,6 +14,8 @@ mod profile_page;
 mod canvas_page;
 #[path = "ui_mac_menus.rs"]
 mod menus;
+#[path = "ui_mac_gif.rs"]
+mod gif_page;
 #[path = "ui_mac_system.rs"]
 mod system;
 
@@ -286,7 +288,6 @@ struct Widgets {
     update_text: Retained<NSTextField>,
     update_auto: Retained<NSButton>,
     launch_at_login: Retained<NSButton>,
-    notifications: Retained<NSButton>,
     update_check: Retained<NSButton>,
     update_action: Retained<NSButton>,
     update_page: Retained<NSButton>,
@@ -335,6 +336,7 @@ struct Ivars {
     crop_editor: RefCell<Option<profile_page::CropEditor>>,
     /// Profil en grand ouvert.
     full_profile: RefCell<Option<profile_page::FullProfile>>,
+    gif: RefCell<gif_page::GifUi>,
     /// Fenêtre principale (cachée au lieu d'être fermée : MagicPlus reste joignable).
     main_window: OnceCell<Retained<NSWindow>>,
     /// Barre des menus, notifications, anti-« App Nap ».
@@ -353,6 +355,7 @@ define_class!(
         fn tick(&self, _timer: &NSTimer) {
             self.refresh_if_needed();
             self.chat_tick();
+            self.gif_tick();
             self.system_tick();
         }
 
@@ -377,18 +380,6 @@ define_class!(
             sender.setState(if engine.launch_at_login() { NSControlStateValueOn } else { 0 });
         }
 
-        #[unsafe(method(notificationsChanged:))]
-        fn notifications_changed(&self, sender: &NSButton) {
-            let enabled = sender.state() == NSControlStateValueOn;
-            let engine = self.engine();
-            if let Err(error) = engine.update_settings(|settings| settings.notifications = enabled) {
-                engine.set_status(error.to_string());
-            }
-            self.refresh_if_needed();
-        }
-
-        // ---- discussions (logique dans ui_mac_chat.rs)
-
         #[unsafe(method(chatSelect:))]
         fn chat_select_action(&self, sender: &AnyObject) {
             self.chat_select(tag_of(sender));
@@ -405,6 +396,18 @@ define_class!(
         }
 
         // ---- menus stylisés (ui_mac_menus.rs)
+
+        #[unsafe(method(gifTileClicked:))]
+        fn gif_tile_clicked_action(&self, recognizer: &NSClickGestureRecognizer) {
+            self.gif_tile_clicked(recognizer);
+        }
+
+        #[unsafe(method(chatGif:))]
+        fn chat_gif_action(&self, sender: &AnyObject) {
+            if let Some(view) = sender.downcast_ref::<NSView>() {
+                self.gif_button(view);
+            }
+        }
 
         #[unsafe(method(popoverAction:))]
         fn popover_action_clicked(&self, sender: &AnyObject) {
@@ -616,8 +619,10 @@ define_class!(
         }
 
         #[unsafe(method(chatEmoji:))]
-        fn chat_emoji_action(&self, _sender: &AnyObject) {
-            self.chat_emoji();
+        fn chat_emoji_action(&self, sender: &AnyObject) {
+            if let Some(view) = sender.downcast_ref::<NSView>() {
+                self.chat_emoji(view);
+            }
         }
 
         #[unsafe(method(chatStickers:))]
@@ -870,6 +875,68 @@ define_class!(
                 self.engine().set_status(error.to_string());
             }
             self.refresh_if_needed();
+        }
+
+        #[unsafe(method(presenceChanged:))]
+        fn presence_changed(&self, sender: &NSPopUpButton) {
+            let Some(item) = sender.selectedItem() else { return };
+            if let Some(presence) = magicplus_core::Presence::CHOICES.get(item.tag().max(0) as usize) {
+                if let Err(error) = self.engine().set_presence(*presence) {
+                    self.engine().set_status(error.to_string());
+                }
+            }
+        }
+
+        #[unsafe(method(autoIdleChanged:))]
+        fn auto_idle_changed(&self, sender: &NSPopUpButton) {
+            let Some(item) = sender.selectedItem() else { return };
+            let minutes = item.tag().max(0) as u32;
+            let _ = self.engine().update_settings(|settings| settings.auto_idle_minutes = minutes);
+        }
+
+        #[unsafe(method(notifGroupsChanged:))]
+        fn notif_groups_changed(&self, sender: &NSPopUpButton) {
+            use magicplus_core::GroupNotifications;
+            let Some(item) = sender.selectedItem() else { return };
+            let groups = match item.tag() {
+                1 => GroupNotifications::Mentions,
+                2 => GroupNotifications::Never,
+                _ => GroupNotifications::All,
+            };
+            let _ = self.engine().update_settings(|settings| settings.notifications.groups = groups);
+        }
+
+        /// Cases à cocher des notifications : le `tag` dit laquelle.
+        #[unsafe(method(notifToggled:))]
+        fn notif_toggled(&self, sender: &NSButton) {
+            let on = sender.state() == NSControlStateValueOn;
+            let tag = sender.tag();
+            let _ = self.engine().update_settings(|settings| {
+                let prefs = &mut settings.notifications;
+                match tag {
+                    1 => prefs.enabled = on,
+                    2 => prefs.direct = on,
+                    3 => prefs.preview = on,
+                    4 => prefs.sound = on,
+                    _ => prefs.when_focused = on,
+                }
+            });
+        }
+
+        #[unsafe(method(notifTest:))]
+        fn notif_test(&self, _sender: &AnyObject) {
+            self.engine().test_notice();
+        }
+
+        #[unsafe(method(themeChanged:))]
+        fn theme_changed(&self, sender: &NSPopUpButton) {
+            let Some(item) = sender.selectedItem() else { return };
+            let Some(theme) = crate::themes::THEMES.get(item.tag().max(0) as usize) else { return };
+            let _ = self.engine().update_settings(|settings| {
+                settings.theme = Some(theme.id.to_string());
+                settings.dark_mode = theme.palette.map(|p| p.dark).or(theme.platform_dark);
+            });
+            apply_theme(theme, self.mtm());
         }
 
         #[unsafe(method(resumeChanged:))]
@@ -1171,7 +1238,6 @@ impl Controller {
             widgets.resume_popup.selectItemAtIndex(index as isize);
             widgets.auto_copy.setState(if snapshot.settings.auto_copy_received { NSControlStateValueOn } else { 0 });
             widgets.update_auto.setState(if snapshot.settings.auto_update { NSControlStateValueOn } else { 0 });
-            widgets.notifications.setState(if snapshot.settings.notifications { NSControlStateValueOn } else { 0 });
             widgets.launch_at_login.setState(if self.engine().launch_at_login() { NSControlStateValueOn } else { 0 });
         }
 
@@ -1845,7 +1911,7 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
     let profile_remove_banner = button("Retirer", sel!(profileRemoveBanner:), controller, mtm);
     banner_row.addArrangedSubview(&profile_remove_banner);
     profile_form.addArrangedSubview(&banner_row);
-    profile_form.addArrangedSubview(&secondary("PNG, JPEG, WebP ou GIF animé. La photo est recadrée en carré, la bannière en 5:2.", mtm));
+    profile_form.addArrangedSubview(&secondary("PNG, JPEG ou GIF animé. La photo est recadrée en carré, la bannière en 5:2.", mtm));
     let profile_color = NSPopUpButton::new(mtm);
     profile_color.addItemWithTitle(&ns("Couleur de la bannière : automatique"));
     for (name, _) in profile_page::BANNER_COLORS {
@@ -1966,15 +2032,6 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         )
     };
     background_card.addArrangedSubview(&launch_at_login);
-    let notifications = unsafe {
-        NSButton::checkboxWithTitle_target_action(
-            &ns("Afficher une notification à chaque message ou demande d'ami reçus"),
-            Some(as_target(controller)),
-            Some(sel!(notificationsChanged:)),
-            mtm,
-        )
-    };
-    background_card.addArrangedSubview(&notifications);
     full_width(
         &background_card,
         &paragraph(
@@ -2010,7 +2067,101 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
     update_card.addArrangedSubview(&update_row);
 
     let look_card = card_in(&content, Some("Apparence"), mtm);
-    look_card.addArrangedSubview(&secondary("MagicPlus suit l'apparence de macOS (clair ou sombre).", mtm));
+    let theme_popup = NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 26.0)),
+        false,
+    );
+    let saved = controller.engine().snapshot().settings;
+    let current = crate::themes::current(saved.theme.as_deref(), saved.dark_mode);
+    for (index, theme) in crate::themes::THEMES.iter().enumerate() {
+        theme_popup.addItemWithTitle(&ns(theme.name));
+        if let Some(item) = theme_popup.lastItem() {
+            item.setTag(index as isize);
+        }
+        if theme.id == current.id {
+            theme_popup.selectItemAtIndex(index as isize);
+        }
+    }
+    unsafe {
+        theme_popup.setTarget(Some(as_target(controller)));
+        theme_popup.setAction(Some(sel!(themeChanged:)));
+    }
+    let theme_row = stack(false, 8.0, mtm);
+    theme_row.addArrangedSubview(&label("Thème :", mtm));
+    theme_row.addArrangedSubview(&theme_popup);
+    look_card.addArrangedSubview(&theme_row);
+    look_card.addArrangedSubview(&secondary(
+        "« Système » suit l'apparence de macOS. Les thèmes de couleur choisissent l'apparence claire ou sombre et le fond de la fenêtre.",
+        mtm,
+    ));
+
+    // Statut (présence) et notifications.
+    let presence_card = card_in(&content, Some("Statut et notifications"), mtm);
+    let saved = controller.engine().snapshot().settings;
+    let popup = |items: &[(&str, isize)], selected: isize, action: Sel| {
+        let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 26.0)), false);
+        for (index, (title, tag)) in items.iter().enumerate() {
+            popup.addItemWithTitle(&ns(title));
+            if let Some(item) = popup.lastItem() {
+                item.setTag(*tag);
+            }
+            if *tag == selected {
+                popup.selectItemAtIndex(index as isize);
+            }
+        }
+        unsafe {
+            popup.setTarget(Some(as_target(controller)));
+            popup.setAction(Some(action));
+        }
+        popup
+    };
+    let presence_index = magicplus_core::Presence::CHOICES.iter().position(|p| *p == saved.presence).unwrap_or(0) as isize;
+    let presence_items: Vec<(&str, isize)> =
+        magicplus_core::Presence::CHOICES.iter().enumerate().map(|(i, p)| (p.label(), i as isize)).collect();
+    let row = stack(false, 8.0, mtm);
+    row.addArrangedSubview(&label("Statut :", mtm));
+    row.addArrangedSubview(&popup(&presence_items, presence_index, sel!(presenceChanged:)));
+    presence_card.addArrangedSubview(&row);
+    let row = stack(false, 8.0, mtm);
+    row.addArrangedSubview(&label("Inactif sans clavier ni souris pendant :", mtm));
+    row.addArrangedSubview(&popup(
+        &[("Jamais", 0), ("5 minutes", 5), ("10 minutes", 10), ("15 minutes", 15), ("30 minutes", 30)],
+        saved.auto_idle_minutes as isize,
+        sel!(autoIdleChanged:),
+    ));
+    presence_card.addArrangedSubview(&row);
+    let prefs = &saved.notifications;
+    for (tag, title, on) in [
+        (1, "Notifications du système pour les nouveaux messages", prefs.enabled),
+        (2, "Discussions à deux", prefs.direct),
+        (3, "Afficher le texte du message", prefs.preview),
+        (4, "Jouer un son", prefs.sound),
+        (5, "Même quand la discussion est ouverte à l'écran", prefs.when_focused),
+    ] {
+        let check = unsafe { NSButton::checkboxWithTitle_target_action(&ns(title), Some(as_target(controller)), Some(sel!(notifToggled:)), mtm) };
+        check.setTag(tag);
+        check.setState(if on { NSControlStateValueOn } else { 0 });
+        presence_card.addArrangedSubview(&check);
+    }
+    let groups_index = match prefs.groups {
+        magicplus_core::GroupNotifications::All => 0,
+        magicplus_core::GroupNotifications::Mentions => 1,
+        magicplus_core::GroupNotifications::Never => 2,
+    };
+    let row = stack(false, 8.0, mtm);
+    row.addArrangedSubview(&label("Groupes :", mtm));
+    row.addArrangedSubview(&popup(
+        &[("Tous les messages", 0), ("Seulement si on me mentionne (@)", 1), ("Jamais", 2)],
+        groups_index,
+        sel!(notifGroupsChanged:),
+    ));
+    presence_card.addArrangedSubview(&row);
+    presence_card.addArrangedSubview(&button("Tester une notification", sel!(notifTest:), controller, mtm));
+    full_width(
+        &presence_card,
+        &paragraph("« Ne pas déranger » coupe toutes les notifications. Réglages fins : Réglages Système → Notifications → MagicPlus.", mtm),
+    );
 
     let about_card = card_in(&content, Some("À propos"), mtm);
     full_width(
@@ -2079,7 +2230,6 @@ fn build_window(controller: &Controller, mtm: MainThreadMarker) -> Retained<NSWi
         update_text,
         update_auto,
         launch_at_login,
-        notifications,
         update_check,
         update_action,
         update_page,
@@ -2125,6 +2275,25 @@ fn build_menu(app: &NSApplication, mtm: MainThreadMarker) {
     app.setMainMenu(Some(&main));
 }
 
+/// Thème de couleur : apparence claire ou sombre (ou celle du système) et fond des fenêtres.
+fn apply_theme(theme: &crate::themes::ThemeDef, mtm: MainThreadMarker) {
+    use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+    let app = NSApplication::sharedApplication(mtm);
+    let dark = theme.palette.map(|p| p.dark).or(theme.platform_dark);
+    let appearance = dark.and_then(|dark| NSAppearance::appearanceNamed(unsafe { if dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua } }));
+    app.setAppearance(appearance.as_deref());
+    let background = match theme.palette {
+        Some(p) => {
+            let channel = |shift: u32| ((p.window >> shift) & 0xff) as f64 / 255.0;
+            NSColor::colorWithSRGBRed_green_blue_alpha(channel(16), channel(8), channel(0), 1.0)
+        }
+        None => NSColor::windowBackgroundColor(),
+    };
+    for window in app.windows().iter() {
+        window.setBackgroundColor(Some(&background));
+    }
+}
+
 pub fn run(engine: Engine) {
     let mtm = MainThreadMarker::new().expect("l'interface doit démarrer sur le fil principal");
     let app = NSApplication::sharedApplication(mtm);
@@ -2134,6 +2303,8 @@ pub fn run(engine: Engine) {
     app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
     build_menu(&app, mtm);
     let window = build_window(&controller, mtm);
+    let settings = engine.snapshot().settings;
+    apply_theme(crate::themes::current(settings.theme.as_deref(), settings.dark_mode), mtm);
     let _ = controller.ivars().main_window.set(window.clone());
     controller.setup_system(mtm);
 

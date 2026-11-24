@@ -403,7 +403,7 @@ impl Controller {
         };
         let picked = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .add_filter("Images et GIF", &["png", "jpg", "jpeg", "gif", "bmp"])
             .pick_file();
         let Some(path) = picked else { return };
         let source = match CropSource::open(&path) {
