@@ -3,14 +3,15 @@
 
 import { Button, Switch, LineEdit, ComboBox, CheckBox, ProgressIndicator, ScrollView, TextEdit, Palette, Slider } from "std-widgets.slint";
 import { Theme, Anim, ThemeColors, ThemeChoice } from "theme.slint";
-import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem, EmojiCell, EmojiRow, InlinePiece, GifItem } from "chat.slint";
+import { ChatPage, ChatDialog, ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, MentionItem, PinItem, EmojiCell, EmojiRow, InlinePiece, GifItem } from "chat.slint";
 
 import { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, MarkdownView } from "markdown.slint";
 import { ProfileCard, ProfileItem, Avatar, PresenceDot, FullProfileView, FullProfileItem, GroupLink } from "profile.slint";
 import { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult } from "canvas.slint";
+import { ImageViewer, ViewerItem } from "viewer.slint";
 
-export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, PinItem, EmojiCell, EmojiRow, InlinePiece, GifItem }
-export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem, FullProfileItem, GroupLink }
+export { ChatData, ConversationItem, MessageItem, AttachmentItem, ReactionItem, ChoiceItem, StickerItem, MemberItem, MentionItem, PinItem, EmojiCell, EmojiRow, InlinePiece, GifItem }
+export { MarkdownStyle, BlockItem, TableRowItem, TableCellItem, ProfileItem, FullProfileItem, GroupLink, ViewerItem }
 export { CanvasData, CanvasItem, VersionItem, FormatButton, FormatResult }
 export { Anim, Theme, ThemeColors, ThemeChoice }
 
@@ -521,6 +522,10 @@ export component AppWindow inherits Window {
     in property <bool> update-has-page;
     in property <bool> update-pending;
     in-out property <bool> update-auto: true;
+    // Choix des appareils qui reçoivent un fichier ou le presse-papiers.
+    in-out property <bool> send-open;
+    in property <string> send-title;
+    in property <[ChoiceItem]> send-targets;
     // Recadrage d'une photo ou d'une bannière.
     in-out property <bool> crop-open;
     in property <bool> crop-banner;
@@ -613,6 +618,10 @@ export component AppWindow inherits Window {
     callback update-auto-changed(bool);
     callback launch-at-login-changed(bool);
     callback crop-changed();
+    callback send-toggle(int, bool);
+    // Envoyer un fichier (image reçue…) aux appareils choisis.
+    callback send-file(string);
+    callback send-confirm();
     callback crop-apply();
     callback show-news();
     callback notifications-changed(bool);
@@ -1976,11 +1985,78 @@ export component AppWindow inherits Window {
                 action(code) => {
                     ChatData.full-action(code);
                 }
+                view-picture(which) => {
+                    ChatData.full-action(10 + which);
+                }
                 open-group(id) => {
                     ChatData.open-group(id);
                 }
                 link-clicked(url) => {
                     ChatData.open-link(url);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------ image en grand
+    if ChatData.viewer-open: ImageViewer {
+        width: parent.width;
+        height: parent.height;
+        item: ChatData.viewer;
+        close => {
+            ChatData.viewer-open = false;
+        }
+        open-file(path) => {
+            ChatData.open-path(path);
+        }
+        reveal(path) => {
+            ChatData.reveal-path(path);
+        }
+    }
+
+    // ------------------------------------------------ envoyer à…
+    if root.send-open: Rectangle {
+        background: #00000099;
+        TouchArea { }
+        Card {
+            width: min(420px, parent.width - 32px);
+            height: self.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.dark ? #2d2d2d : #ffffff;
+            Text {
+                text: root.send-title;
+                color: Theme.text;
+                font-size: 18px;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            Subtle {
+                text: "Choisissez les appareils qui le reçoivent.";
+            }
+            for target[index] in root.send-targets: CheckBox {
+                text: target.name;
+                checked: target.checked;
+                toggled => {
+                    root.send-toggle(index, self.checked);
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Annuler";
+                    clicked => {
+                        root.send-open = false;
+                    }
+                }
+                Button {
+                    text: "Envoyer";
+                    primary: true;
+                    clicked => {
+                        root.send-open = false;
+                        root.send-confirm();
+                    }
                 }
             }
         }

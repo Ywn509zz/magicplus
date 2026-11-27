@@ -193,8 +193,14 @@ impl Engine {
     /// Ajoute des fichiers à envoyer à tous les appareils associés joignables. Les envois
     /// interrompus reprennent tout seuls (voir `spawn_scheduler`).
     pub fn send_files(&self, paths: Vec<PathBuf>) {
+        self.send_files_to(paths, None);
+    }
+
+    /// Envoie des fichiers aux appareils choisis (`None` : tous ceux qui sont joignables).
+    pub fn send_files_to(&self, paths: Vec<PathBuf>, only: Option<&[String]>) {
         let inner = &self.inner;
-        let targets = inner.online_targets();
+        let targets: Vec<_> =
+            inner.online_targets().into_iter().filter(|t| only.is_none_or(|ids| ids.contains(&t.id))).collect();
         if targets.is_empty() {
             inner.set_status("Aucun appareil associé n'est joignable");
             return;

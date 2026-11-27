@@ -943,6 +943,27 @@ impl Engine {
     /// Envoie le texte du presse-papiers à tous les appareils associés joignables.
     /// Chaque destinataire confirme ; un refus (appareil qui ne nous a pas associé…) est affiché.
     pub fn send_clipboard(&self, copy_selection: bool) {
+        self.send_clipboard_to(copy_selection, None);
+    }
+
+    /// Appareils associés joignables en ce moment : (identifiant, nom affiché), pour choisir
+    /// où envoyer un fichier ou le presse-papiers.
+    pub fn reachable_devices(&self) -> Vec<(String, String)> {
+        let mut devices: Vec<(String, String)> = self
+            .inner
+            .online_targets()
+            .into_iter()
+            .map(|t| {
+                let name = self.inner.display_name(&t.id).unwrap_or(t.name);
+                (t.id, name)
+            })
+            .collect();
+        devices.sort_by_key(|device| device.1.to_lowercase());
+        devices
+    }
+
+    /// Envoie le presse-papiers aux appareils choisis (`None` : tous ceux qui sont joignables).
+    pub fn send_clipboard_to(&self, copy_selection: bool, only: Option<Vec<String>>) {
         if copy_selection {
             if let Err(error) = copy_selection_to_clipboard() {
                 self.inner.set_status(format!("Copie de la sélection impossible : {error}"));
@@ -957,7 +978,12 @@ impl Engine {
             self.inner.set_status("Texte trop volumineux pour le presse-papiers partagé (2 Mo maximum)");
             return;
         }
-        let targets = self.inner.online_targets();
+        let targets: Vec<Target> = self
+            .inner
+            .online_targets()
+            .into_iter()
+            .filter(|t| only.as_ref().is_none_or(|ids| ids.contains(&t.id)))
+            .collect();
         if targets.is_empty() {
             self.inner.set_status("Aucun appareil associé n'est joignable");
             return;

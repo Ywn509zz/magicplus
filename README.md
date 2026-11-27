@@ -168,7 +168,14 @@ cargo test
    Le **profil en grand** (photo de quelqu'un → « Profil complet », ou bouton « Profil » dans
    Appareils) montre bannière, photo, pseudo, pronoms, présentation, groupes en commun, et propose
    « Envoyer un message » ou « Ajouter en ami ».
-9. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
+9. **Images, mentions, envois ciblés** : un clic sur une image ou un GIF l'affiche **en grand**.
+   Taper « @ » propose les membres de la discussion (Entrée ou Tab : le premier) ; les mentions sont
+   colorées et un message qui vous mentionne est surligné. « Envoyer des fichiers » et « Envoyer le
+   presse-papiers » demandent **à quels appareils** envoyer quand plusieurs sont joignables. Le menu
+   d'un message avec une image ou un GIF permet de l'ajouter à ses GIF et autocollants, de le copier
+   (pour le coller ailleurs) ou de l'envoyer à un appareil ; hors ligne, le bouton GIF propose les GIF
+   déjà envoyés.
+10. **Mises à jour** : quand une nouvelle version est publiée, la barre d'état l'annonce et
    « Paramètres » porte une pastille. **Paramètres → Mises à jour → Télécharger et installer**, puis
    **Redémarrer et installer** : MagicPlus se remplace et redémarre. Au premier lancement de la
    nouvelle version, une fenêtre résume les **nouveautés** (tirées de `CHANGELOG.md`, intégré au

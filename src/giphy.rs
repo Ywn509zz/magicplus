@@ -15,6 +15,9 @@ pub const PAGE: usize = 24;
 /// Poids maximal d'un GIF téléchargé (aperçu ou GIF à envoyer).
 const MAX_DOWNLOAD: u64 = 8 * 1024 * 1024;
 const FAVORITES: &str = "gif-favoris.json";
+/// GIF envoyés récemment (gardés sur le disque : réutilisables hors ligne).
+const RECENTS: &str = "gif-recents.json";
+const MAX_RECENTS: usize = 60;
 const DIR: &str = "giphy";
 pub const MAX_FAVORITES: usize = 200;
 
@@ -178,7 +181,53 @@ impl Engine {
             fs::create_dir_all(path.parent().unwrap_or(&self.giphy_dir()))?;
             fs::write(&path, bytes)?;
         }
+        self.remember_gif(gif);
         self.send_chat(conversation, "", None, &[path])
+    }
+
+    fn remember_gif(&self, gif: &GifResult) {
+        let mut recents = self.gif_recents();
+        recents.retain(|g| g.id != gif.id);
+        recents.insert(0, gif.clone());
+        recents.truncate(MAX_RECENTS);
+        let _ = self.inner.store.save(RECENTS, &recents);
+    }
+
+    /// GIF envoyés récemment (les plus récents d'abord).
+    pub fn gif_recents(&self) -> Vec<GifResult> {
+        self.inner.store.load(RECENTS).unwrap_or_default()
+    }
+
+    /// GIF utilisables sans Internet : déjà envoyés (récents, puis favoris) et gardés sur le
+    /// disque, dont le titre contient `query` (tous si vide). Les autres ne sont pas disponibles
+    /// hors ligne : il faut les avoir utilisés une fois.
+    pub fn gif_offline(&self, query: &str) -> Vec<GifResult> {
+        let query = query.trim().to_lowercase();
+        let dir = self.giphy_dir().join("envois");
+        let mut list: Vec<GifResult> = Vec::new();
+        for gif in self.gif_recents().into_iter().chain(self.gif_favorites()) {
+            let cached = dir.join(format!("{}.gif", gif.id)).is_file();
+            let matches = query.is_empty() || gif.title.to_lowercase().contains(&query);
+            if cached && matches && !list.iter().any(|g| g.id == gif.id) {
+                list.push(gif);
+            }
+        }
+        list
+    }
+
+    /// Recherche GIPHY, ou hors ligne (pas d'Internet, pas de clé) les GIF déjà utilisés.
+    pub fn gif_search_or_offline(&self, query: &str, offset: usize) -> Result<Vec<GifResult>> {
+        match self.giphy_search(query, offset) {
+            Ok(results) => Ok(results),
+            Err(error) => {
+                let offline = if offset == 0 { self.gif_offline(query) } else { Vec::new() };
+                if offline.is_empty() {
+                    Err(error)
+                } else {
+                    Ok(offline)
+                }
+            }
+        }
     }
 
     /// GIF favoris (les plus récents d'abord).

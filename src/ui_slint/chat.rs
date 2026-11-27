@@ -1,7 +1,7 @@
 //! Page « Discussions » de l'interface Slint (Windows) : relie le global `ChatData`
 //! (ui/chat.slint) au moteur. Mêmes fonctions que la page AppKit du Mac (src/ui_mac_chat.rs).
 
-use super::{emoji::{self, Customs}, AppWindow, AttachmentItem, ChatData, ChoiceItem, ConversationItem, EmojiCell, GifItem, MemberItem, MessageItem, ReactionItem, StickerItem};
+use super::{emoji::{self, Customs}, AppWindow, AttachmentItem, ChatData, ViewerItem, ChoiceItem, ConversationItem, EmojiCell, GifItem, MemberItem, MessageItem, ReactionItem, StickerItem};
 use magicplus_core::{GifResult, Presence};
 use crate::shared::{avatar_hue, initials, jumbo, open_path, time_label};
 use magicplus_core::{
@@ -158,6 +158,8 @@ fn status_label(message: &MessageView) -> String {
 
 #[derive(Default)]
 struct State {
+    /// Mention en cours de frappe : position du « @ » dans le brouillon et suggestions.
+    mention: Option<(usize, Vec<magicplus_core::mentions::MentionChoice>)>,
     /// Recherche GIPHY affichée (les réponses d'une recherche plus ancienne sont ignorées).
     gif_generation: u64,
     gif_results: Vec<GifResult>,
@@ -285,7 +287,7 @@ impl Chat {
         let engine = self.engine.clone();
         let inbox = self.gif_inbox.clone();
         std::thread::spawn(move || {
-            let results = if favorites_tab { Ok(engine.gif_favorites()) } else { engine.giphy_search(&query, 0) };
+            let results = if favorites_tab { Ok(engine.gif_favorites()) } else { engine.gif_search_or_offline(&query, 0) };
             let results = match results {
                 Ok(results) => results,
                 Err(error) => {
@@ -420,6 +422,70 @@ impl Chat {
         let data = ui.global::<ChatData>();
         data.set_profile(super::profile::profile_item(&profile, can_chat));
         data.set_profile_request(data.get_profile_request() + 1);
+    }
+
+    /// Suggestions « @nom » d'après le brouillon (mention en train d'être tapée à la fin).
+    fn update_mentions(&self, conversation: &str) {
+        let Some(ui) = self.ui() else { return };
+        let data = ui.global::<ChatData>();
+        let draft = data.get_draft().to_string();
+        let found = magicplus_core::mentions::pending_query(&draft, draft.len())
+            .map(|(at, query)| (at, self.engine.mention_choices(conversation, &query)))
+            .filter(|(_, choices)| !choices.is_empty());
+        let items: Vec<super::MentionItem> = found
+            .as_ref()
+            .map(|(_, choices)| {
+                choices
+                    .iter()
+                    .map(|c| super::MentionItem {
+                        label: c.label.clone().into(),
+                        detail: if c.name != c.label { format!("@{}{}", c.name, if c.detail.is_empty() { String::new() } else { format!("  ·  {}", c.detail) }) } else { c.detail.clone() }.into(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.state.borrow_mut().mention = found;
+        data.set_mention_choices(ModelRc::new(VecModel::from(items)));
+    }
+
+    fn pick_mention(&self, index: usize) {
+        let Some(ui) = self.ui() else { return };
+        let data = ui.global::<ChatData>();
+        let Some((at, choices)) = self.state.borrow_mut().mention.take() else { return };
+        let Some(choice) = choices.get(index) else { return };
+        let draft = data.get_draft().to_string();
+        let (text, _) = magicplus_core::mentions::complete(&draft, at, draft.len(), &choice.name);
+        data.set_draft(text.into());
+        data.set_mention_choices(ModelRc::default());
+        data.set_focus_request(data.get_focus_request() + 1);
+    }
+
+    fn close_mentions(&self) {
+        self.state.borrow_mut().mention = None;
+        if let Some(ui) = self.ui() {
+            ui.global::<ChatData>().set_mention_choices(ModelRc::default());
+        }
+    }
+
+    /// Image ou GIF en grand (sinon, autre fichier : ouvert par le système).
+    pub fn view_image(&self, path: &Path) {
+        let Some(ui) = self.ui() else { return };
+        let Some(picture) = super::images::picture(path, 1600) else {
+            open_path(&path.to_string_lossy());
+            return;
+        };
+        let size = picture.still.size();
+        let data = ui.global::<ChatData>();
+        data.set_viewer(ViewerItem {
+            name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into(),
+            path: path.to_string_lossy().to_string().into(),
+            still: picture.still,
+            frames: ModelRc::new(VecModel::from(picture.frames)),
+            frame_ms: picture.frame_ms,
+            width: size.width as f32,
+            height: size.height as f32,
+        });
+        data.set_viewer_open(true);
     }
 
     /// Profil en grand.
@@ -696,6 +762,8 @@ impl Chat {
 
     /// Met à jour les lignes de messages : seules les lignes ajoutées ou changées sont refaites.
     fn refresh_messages(&self, messages: Vec<MessageView>, force: bool) {
+        // Noms qu'on peut mentionner ici : mis en évidence dans les messages.
+        let names = self.current().map(|c| self.engine.mention_names(&c)).unwrap_or_default();
         let mut st = self.state.borrow_mut();
         st.used.retain(|key| key.1 == Frame::Thumb);
         let last_mine = messages.iter().rposition(|m| m.mine && !m.system);
@@ -741,7 +809,7 @@ impl Chat {
             );
             let unchanged = !force && st.signatures.get(index) == Some(&signature);
             let item = (!unchanged).then(|| {
-                message_item(message, headers[index], Some(index) == last_mine, attachments.into_iter().map(|(item, _)| item).collect(), &customs)
+                message_item(message, headers[index], Some(index) == last_mine, attachments.into_iter().map(|(item, _)| item).collect(), &customs, &names)
                     .with_picture(self.picture_of(&message.author_id, 76))
                     .with_reply_photo(message.reply.as_ref().and_then(|r| self.photo_of(&r.author_id, 32)))
             });
@@ -770,7 +838,7 @@ impl Chat {
                     item.take().unwrap_or_else(|| {
                         let message = &messages[index];
                         let attachments = message.attachments.iter().map(|a| self.attachment_item(&mut st, a).0).collect();
-                        message_item(message, headers[index], Some(index) == last_mine, attachments, &customs)
+                        message_item(message, headers[index], Some(index) == last_mine, attachments, &customs, &names)
                             .with_picture(self.picture_of(&message.author_id, 76))
                     .with_reply_photo(message.reply.as_ref().and_then(|r| self.photo_of(&r.author_id, 32)))
                     })
@@ -1062,6 +1130,32 @@ impl Chat {
                 self.state.borrow_mut().delete_target = Some(message.id.clone());
                 self.open_dialog(&data, 4, "Supprimer ce message ?", "Il disparaîtra aussi chez les autres membres de la discussion.");
             }
+            "view-media" => {
+                if let Some(path) = media_of(&message) {
+                    self.view_image(&path);
+                }
+            }
+            "save-media" => {
+                if let Some(path) = media_of(&message) {
+                    match self.engine.add_sticker(&path) {
+                        Ok(_) => {
+                            self.status("Ajouté à vos GIF et autocollants (bouton autocollant de la zone de saisie)".to_string());
+                            self.refresh_stickers();
+                        }
+                        Err(error) => self.status(error.to_string()),
+                    }
+                }
+            }
+            "copy-media" => {
+                if let Some(path) = media_of(&message) {
+                    super::files_clipboard::copy_file(&self.engine, &path);
+                }
+            }
+            "send-media" => {
+                if let Some(path) = media_of(&message) {
+                    ui.invoke_send_file(path.to_string_lossy().to_string().into());
+                }
+            }
             "copy" => match self.engine.write_local_clipboard(&markdown::plain(&message.text)) {
                 Ok(()) => self.status("Texte du message copié"),
                 Err(error) => self.status(error.to_string()),
@@ -1300,7 +1394,23 @@ impl Chat {
     }
 }
 
-fn message_item(message: &MessageView, header: bool, last_mine: bool, attachments: Vec<AttachmentItem>, customs: &Customs) -> MessageItem {
+/// Première image ou GIF reçu d'un message.
+fn media_of(message: &MessageView) -> Option<PathBuf> {
+    message
+        .attachments
+        .iter()
+        .filter(|a| matches!(a.kind, AttachmentKind::Image | AttachmentKind::Gif | AttachmentKind::Sticker))
+        .find_map(|a| a.path.clone())
+}
+
+fn message_item(
+    message: &MessageView,
+    header: bool,
+    last_mine: bool,
+    attachments: Vec<AttachmentItem>,
+    customs: &Customs,
+    names: &[String],
+) -> MessageItem {
     // Émojis personnalisés : en grand (émojis seuls), dans la ligne (texte simple), sinon « :nom: ».
     let shown = magicplus_core::emoji::display_text(&message.text);
     let big = if message.deleted || message.system { Vec::new() } else { emoji::big_emojis(&message.text, customs) };
@@ -1320,7 +1430,9 @@ fn message_item(message: &MessageView, header: bool, last_mine: bool, attachment
         system: message.system,
         header,
         time: time_label(message.sent_ms).into(),
-        blocks: if message.deleted || message.system { ModelRc::default() } else { super::markdown::blocks(&shown) },
+        blocks: if message.deleted || message.system { ModelRc::default() } else { super::markdown::blocks_with_mentions(&shown, names) },
+        mentions_me: message.mentions_me,
+        has_media: media_of(message).is_some(),
         plain: shown.trim().into(),
         has_code: !message.deleted && super::markdown::code_of(&message.text).is_some(),
         pinned_by: message.pinned_by.clone().unwrap_or_default().into(),
@@ -1388,8 +1500,11 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
             if !ui.global::<ChatData>().get_draft().trim().is_empty() {
                 chat.engine.notify_typing(&conversation);
             }
+            chat.update_mentions(&conversation);
         }
     });
+    on!(on_pick_mention, |chat, index| chat.pick_mention(index.max(0) as usize));
+    on!(on_close_mentions, |chat| chat.close_mentions());
     on!(on_paste_media, |chat| chat.paste_media());
     on!(on_cancel_banner, |chat| chat.cancel_banner());
     on!(on_edit_last, |chat| chat.edit_last());
@@ -1432,6 +1547,12 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
     on!(on_open_path, |chat, path| {
         if !path.is_empty() {
             open_path(&path);
+        }
+    });
+    on!(on_view_image, |chat, path| chat.view_image(Path::new(path.as_str())));
+    on!(on_reveal_path, |chat, path| {
+        if !path.is_empty() {
+            crate::shared::reveal(&path);
         }
     });
     on!(on_open_link, |chat, url| {
@@ -1556,6 +1677,12 @@ fn install(chat: &Rc<Chat>, data: &ChatData) {
                     chat.status(error.to_string());
                 }
                 chat.show_full_profile(&id);
+            }
+            10 | 11 => {
+                let picture = chat.engine.profile(&id).and_then(|p| if action == 10 { p.avatar } else { p.banner });
+                if let Some(path) = picture {
+                    chat.view_image(&path);
+                }
             }
             _ => {
                 data.set_full_open(false);

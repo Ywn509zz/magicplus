@@ -1,0 +1,99 @@
+// Image ou GIF en grand (clic sur une image d'une discussion, sur une photo ou une bannière de profil).
+
+import { Button } from "std-widgets.slint";
+import { Theme, Anim } from "theme.slint";
+
+export struct ViewerItem {
+    name: string,
+    path: string,
+    still: image,
+    frames: [image],
+    frame-ms: int,
+    // Taille réelle de l'image (pour ne pas l'agrandir au-delà).
+    width: length,
+    height: length,
+}
+
+export component ImageViewer inherits Rectangle {
+    in property <ViewerItem> item;
+    callback close();
+    callback open-file(string);
+    callback reveal(string);
+    background: #000000e0;
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // Clic à côté de l'image : fermer.
+    TouchArea {
+        clicked => {
+            root.close();
+        }
+    }
+
+    property <length> max-w: root.width - 80px;
+    property <length> max-h: root.height - 120px;
+    property <float> scale: min(1, min(root.max-w / max(root.item.width, 1px), root.max-h / max(root.item.height, 1px)));
+
+    Rectangle {
+        width: root.item.width * root.scale;
+        height: root.item.height * root.scale;
+        x: (root.width - self.width) / 2;
+        y: (root.height - 60px - self.height) / 2;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            image-fit: contain;
+            source: root.item.frames.length > 1 ? root.item.frames[Math.mod(Math.floor(Anim.tick * 50 / Math.max(root.item.frame-ms, 20)), root.item.frames.length)] : root.item.still;
+        }
+        // Clic sur l'image : rien (ne ferme pas).
+        TouchArea { }
+    }
+
+    HorizontalLayout {
+        y: root.height - 52px;
+        height: 36px;
+        padding-left: 20px;
+        padding-right: 20px;
+        spacing: 10px;
+        Text {
+            text: root.item.name;
+            color: #ffffff;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Ouvrir";
+            clicked => {
+                root.open-file(root.item.path);
+            }
+        }
+        Button {
+            text: "Afficher dans le dossier";
+            clicked => {
+                root.reveal(root.item.path);
+            }
+        }
+        Button {
+            text: "Fermer";
+            primary: true;
+            clicked => {
+                root.close();
+            }
+        }
+    }
+
+    init => {
+        keys.focus();
+    }
+}

@@ -9,6 +9,7 @@ import { Theme } from "theme.slint";
 import { MarkdownView, BlockItem } from "markdown.slint";
 import { Avatar, ProfileCard, ProfileItem, FullProfileItem, GroupLink } from "profile.slint";
 import { CanvasPane, CanvasData } from "canvas.slint";
+import { ViewerItem } from "viewer.slint";
 
 export struct ConversationItem {
     id: string,
@@ -114,6 +115,10 @@ export struct MessageItem {
     has-code: bool,
     // Épinglé par (vide sinon), auteur d'origine d'un message transféré (vide sinon).
     pinned-by: string,
+    // Le message nous mentionne : surligné.
+    mentions-me: bool,
+    // Il contient une image ou un GIF reçu (voir en grand, réutiliser).
+    has-media: bool,
     forwarded: string,
     deleted: bool,
     edited: bool,
@@ -147,6 +152,12 @@ export struct StickerItem {
     image: image,
     frames: [image],
     frame-ms: int,
+}
+
+// Suggestion de mention (« @ » dans la zone de saisie).
+export struct MentionItem {
+    label: string,
+    detail: string,
 }
 
 export struct MemberItem {
@@ -261,6 +272,15 @@ export global ChatData {
     callback message-action(int, string);
     callback toggle-reaction(int, string);
     callback open-path(string);
+    // Image ou GIF en grand.
+    in property <ViewerItem> viewer;
+    in-out property <bool> viewer-open;
+    callback view-image(string);
+    // Mentions : suggestions pendant la frappe.
+    in property <[MentionItem]> mention-choices;
+    callback pick-mention(int);
+    callback close-mentions();
+    callback reveal-path(string);
     callback open-link(string);
     callback attach();
     callback remove-pending(int);
@@ -1058,7 +1078,15 @@ component MessageRow inherits Rectangle {
     in property <length> bubble-max: 520px;
     preferred-height: body.preferred-height;
     min-height: body.min-height;
-    background: hover.has-hover ? Theme.row-hover : transparent;
+    background: root.message.mentions-me ? (hover.has-hover ? #f0b23238 : #f0b23224) : hover.has-hover ? Theme.row-hover : transparent;
+
+    // Mention de nous : trait doré à gauche, comme sur Discord.
+    if root.message.mentions-me: Rectangle {
+        x: 0px;
+        width: 2px;
+        height: parent.height;
+        background: #f0b232;
+    }
 
     // Menu d'actions stylisé (dessiné par la page), à la position donnée (fenêtre).
     function open-actions(x: length, y: length) {
@@ -1273,7 +1301,7 @@ component MessageRow inherits Rectangle {
                             TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 clicked => {
-                                    ChatData.open-path(item.path);
+                                    ChatData.view-image(item.path);
                                 }
                             }
                         }
@@ -1410,6 +1438,61 @@ component Composer inherits Rectangle {
         input.focus();
     }
 
+    // Suggestions de mentions, au-dessus de la zone de saisie (Entrée ou Tab : la première).
+    if ChatData.mention-choices.length > 0: Rectangle {
+        x: 40px;
+        y: -self.height - 6px;
+        width: min(340px, root.width - 80px);
+        height: mention-list.preferred-height + 12px;
+        background: Theme.popup;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000055;
+        mention-list := VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            Text {
+                text: "MEMBRES";
+                color: Theme.subtle;
+                font-size: 10.5px;
+                font-weight: 700;
+            }
+            for choice[index] in ChatData.mention-choices: Rectangle {
+                height: 32px;
+                border-radius: 5px;
+                background: index == 0 || choice-touch.has-hover ? Theme.accent.with-alpha(0.16) : transparent;
+                choice-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        ChatData.pick-mention(index);
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 8px;
+                    Text {
+                        text: choice.label;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: choice.detail;
+                        color: Theme.subtle;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+    }
+
     layout := HorizontalLayout {
         spacing: 4px;
 
@@ -1429,6 +1512,14 @@ component Composer inherits Rectangle {
             height: root.composer-height;
             focus-on-click: false;
             capture-key-pressed(event) => {
+                if ChatData.mention-choices.length > 0 && (event.text == Key.Return || event.text == Key.Tab) {
+                    ChatData.pick-mention(0);
+                    return accept;
+                }
+                if ChatData.mention-choices.length > 0 && event.text == Key.Escape {
+                    ChatData.close-mentions();
+                    return accept;
+                }
                 if event.text == Key.Return && !event.modifiers.shift {
                     ChatData.send();
                     return accept;
@@ -2046,6 +2137,39 @@ HorizontalLayout {
                     clicked => {
                         actions-popup.close();
                         ChatData.message-action(ChatData.actions-index, "copy-code");
+                    }
+                }
+                if ChatData.actions-message.has-media: MenuLine { }
+                if ChatData.actions-message.has-media: MenuRow {
+                    icon: @image-url("icons/file.svg");
+                    text: "Voir en grand";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "view-media");
+                    }
+                }
+                if ChatData.actions-message.has-media: MenuRow {
+                    icon: @image-url("icons/sticker.svg");
+                    text: "Ajouter à mes GIF et autocollants";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "save-media");
+                    }
+                }
+                if ChatData.actions-message.has-media: MenuRow {
+                    icon: @image-url("icons/copy.svg");
+                    text: "Copier l'image";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "copy-media");
+                    }
+                }
+                if ChatData.actions-message.has-media: MenuRow {
+                    icon: @image-url("icons/transfer.svg");
+                    text: "Envoyer à un appareil…";
+                    clicked => {
+                        actions-popup.close();
+                        ChatData.message-action(ChatData.actions-index, "send-media");
                     }
                 }
                 if ChatData.actions-message.mine && !ChatData.closed: MenuLine { }

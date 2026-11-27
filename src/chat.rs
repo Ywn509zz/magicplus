@@ -151,6 +151,8 @@ pub struct MessageView {
     pub forwarded: Option<String>,
     /// Épinglé (par qui).
     pub pinned_by: Option<String>,
+    /// Le message nous mentionne (« @pseudo », « @nom », « @tous ») : surligné, comme sur Discord.
+    pub mentions_me: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -965,6 +967,11 @@ impl Inner {
         lock(&self.chat).member(conversation, id)
     }
 
+    /// Membres d'une conversation (nous compris).
+    pub(crate) fn conversation_member_ids(&self, conversation: &str) -> Vec<String> {
+        lock(&self.chat).conversations.get(conversation).map(|c| c.meta.members.iter().map(|m| m.id.clone()).collect()).unwrap_or_default()
+    }
+
     /// Groupes ouverts dont `id` est membre : (conversation, nom).
     pub(crate) fn shared_groups(&self, id: &str) -> Vec<(String, String)> {
         let chat = lock(&self.chat);
@@ -1584,6 +1591,10 @@ impl Engine {
             .filter_map(|t| t.attachment.clone().map(|id| (id, t.progress)))
             .collect();
         let display = self.inner.display_names();
+        let my_names: Vec<String> = {
+            let identity = self.inner.identity.read().unwrap_or_else(|p| p.into_inner());
+            vec![identity.name.clone(), identity.pseudo.clone()]
+        };
         let chat = lock(&self.inner.chat);
         let me = chat.me.clone();
         let Some(state) = chat.conversations.get(conversation) else { return Vec::new() };
@@ -1681,6 +1692,10 @@ impl Engine {
                     lamport: m.lamport,
                     forwarded: m.forwarded.clone(),
                     pinned_by: m.pinned.as_deref().map(name_of),
+                    mentions_me: m.author != me
+                        && !m.system
+                        && !m.deleted
+                        && !crate::mentions::find_mentions(&m.text, &my_names).is_empty(),
                 }
             })
             .collect()

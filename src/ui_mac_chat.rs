@@ -4,7 +4,7 @@
 //! « en train d'écrire », autocollants et GIF. Rien ne dépend d'Internet.
 
 use super::*;
-use super::markdown_view::{code_of, markdown_view};
+use super::markdown_view::code_of;
 use crate::shared::{avatar_hue, initials, jumbo, open_path, time_label};
 use magicplus_core::{markdown, AttachmentKind, ConversationKind, ConversationView, MessageStatus, MessageView};
 use objc2::{runtime::NSObjectProtocol as _, AnyThread};
@@ -448,6 +448,11 @@ pub(super) fn build(controller: &Controller, mtm: MainThreadMarker) -> (Retained
 // ------------------------------------------------------------------ logique de la page
 
 impl Controller {
+    /// Zone de saisie des messages.
+    pub(super) fn chat_input(&self) -> Retained<NSTextView> {
+        self.chat_widgets().input.clone()
+    }
+
     fn chat_widgets(&self) -> &ChatWidgets {
         self.ivars().chat_widgets.get().expect("page Discussions construite")
     }
@@ -816,7 +821,8 @@ impl Controller {
         } else if !message.text.is_empty() {
             // Émojis personnalisés au milieu du texte : « :nom: ».
             let shown = magicplus_core::emoji::display_text(&message.text);
-            content.addArrangedSubview(&markdown_view(&shown, 13.5, ui.bubble_width, mtm));
+            let names = ui.current.as_deref().map(|c| self.engine().mention_names(c)).unwrap_or_default();
+            content.addArrangedSubview(&super::markdown_view::markdown_view_mentions(&shown, 13.5, ui.bubble_width, &names, mtm));
             has_content = true;
         }
         for attachment in &message.attachments {
@@ -883,6 +889,15 @@ impl Controller {
             Some(reply) => self.with_reply_line(ui, row, reply, mtm),
             None => Retained::into_super(row),
         };
+        // Il nous mentionne : fond doré léger et trait à gauche, comme sur Discord.
+        if message.mentions_me {
+            let tint = super::markdown_view::fill_view(5, 0xF0B232, 0.0, mtm);
+            view.addSubview_positioned_relativeTo(&tint, objc2_app_kit::NSWindowOrderingMode::Below, None);
+            tint.leadingAnchor().constraintEqualToAnchor_constant(&view.leadingAnchor(), -8.0).setActive(true);
+            tint.trailingAnchor().constraintEqualToAnchor(&view.trailingAnchor()).setActive(true);
+            tint.topAnchor().constraintEqualToAnchor(&view.topAnchor()).setActive(true);
+            tint.bottomAnchor().constraintEqualToAnchor(&view.bottomAnchor()).setActive(true);
+        }
         // Clic droit sur le message : même menu stylisé.
         let right_click = unsafe {
             NSClickGestureRecognizer::initWithTarget_action(NSClickGestureRecognizer::alloc(mtm), Some(as_target(self)), Some(sel!(chatRowRightClick:)))
@@ -990,7 +1005,7 @@ impl Controller {
                 view.setTranslatesAutoresizingMaskIntoConstraints(false);
                 view.widthAnchor().constraintEqualToConstant((size.width * scale).max(24.0)).setActive(true);
                 view.heightAnchor().constraintEqualToConstant((size.height * scale).max(24.0)).setActive(true);
-                view.setToolTip(Some(&ns(&format!("{} — cliquer pour ouvrir", attachment.file_name))));
+                view.setToolTip(Some(&ns(&format!("{} — cliquer pour voir en grand", attachment.file_name))));
                 view.setTag(ui.attachment_paths.len() as isize);
                 ui.attachment_paths.push(path.clone());
                 let click = unsafe {
@@ -1148,6 +1163,9 @@ impl Controller {
 
     /// Touches spéciales de la zone de saisie : Entrée envoie, Maj+Entrée va à la ligne, Échap annule.
     pub(super) fn chat_command(&self, selector: Sel) -> bool {
+        if self.mention_command(selector) {
+            return true;
+        }
         if selector == sel!(insertNewline:) {
             let shift = NSApplication::sharedApplication(self.mtm())
                 .currentEvent()
@@ -1169,6 +1187,7 @@ impl Controller {
                 self.engine().notify_typing(&conversation);
             }
         }
+        self.mention_text_changed();
     }
 
     pub(super) fn chat_reply(&self, index: isize) {
@@ -1307,7 +1326,12 @@ impl Controller {
     pub(super) fn chat_open_attachment(&self, tag: isize) {
         let path = self.ivars().chat.borrow().attachment_paths.get(tag.max(0) as usize).cloned();
         if let Some(path) = path {
-            open_path(&path.to_string_lossy());
+            // Images et GIF : en grand dans MagicPlus ; autres fichiers : avec le système.
+            if super::viewer::is_viewable(&path) {
+                self.view_image(&path);
+            } else {
+                open_path(&path.to_string_lossy());
+            }
         }
     }
 

@@ -18,6 +18,14 @@ mod menus;
 mod gif_page;
 #[path = "ui_mac_system.rs"]
 mod system;
+#[path = "ui_mac_viewer.rs"]
+mod viewer;
+#[path = "ui_mac_mentions.rs"]
+mod mentions_ui;
+#[path = "ui_mac_targets.rs"]
+mod targets;
+#[path = "ui_mac_media.rs"]
+mod media;
 
 use crate::shared::{hotkey_labels, platform_label, reveal, setup_hotkeys};
 use chat_page::{ChatUi, ChatWidgets, CHAT_PAGE};
@@ -332,6 +340,10 @@ struct Ivars {
     /// Menu stylisé ouvert et les actions de ses boutons.
     popover: RefCell<Option<Retained<objc2_app_kit::NSPopover>>>,
     popover_actions: RefCell<Vec<menus::Action>>,
+    /// Image en grand.
+    viewer: RefCell<Option<viewer::Viewer>>,
+    /// Mention en cours de frappe (suggestions affichées).
+    mention: RefCell<Option<mentions_ui::PendingMention>>,
     /// Recadrage d'une photo ou d'une bannière en cours.
     crop_editor: RefCell<Option<profile_page::CropEditor>>,
     /// Profil en grand ouvert.
@@ -496,6 +508,21 @@ define_class!(
             if let Some(id) = self.close_profile_popover() {
                 self.chat_with(&id);
             }
+        }
+
+        #[unsafe(method(viewerOpen:))]
+        fn viewer_open(&self, _sender: &AnyObject) {
+            self.viewer_action(0);
+        }
+
+        #[unsafe(method(viewerReveal:))]
+        fn viewer_reveal(&self, _sender: &AnyObject) {
+            self.viewer_action(1);
+        }
+
+        #[unsafe(method(viewerClose:))]
+        fn viewer_close(&self, _sender: &AnyObject) {
+            self.viewer_action(2);
         }
 
         #[unsafe(method(peerProfile:))]
@@ -775,8 +802,9 @@ define_class!(
 
         #[unsafe(method(sendClipboard:))]
         fn send_clipboard(&self, _sender: &NSButton) {
+            let Some(only) = self.choose_targets("le presse-papiers") else { return };
             let engine = self.engine().clone();
-            thread::spawn(move || engine.send_clipboard(false));
+            thread::spawn(move || engine.send_clipboard_to(false, only));
         }
 
         #[unsafe(method(pasteReceived:))]
@@ -806,7 +834,10 @@ define_class!(
         #[unsafe(method(chooseFiles:))]
         fn choose_files(&self, _sender: &NSButton) {
             if let Some(paths) = rfd::FileDialog::new().set_title("Choisir les fichiers à envoyer").pick_files() {
-                self.engine().send_files(paths);
+                let what = if paths.len() == 1 { "ce fichier".to_string() } else { format!("ces {} fichiers", paths.len()) };
+                if let Some(only) = self.choose_targets(&what) {
+                    self.engine().send_files_to(paths, only.as_deref());
+                }
             }
             self.refresh_if_needed();
         }
@@ -2328,6 +2359,10 @@ pub fn run(engine: Engine) {
     }
     controller.refresh(true);
     let _ = engine.take_dirty();
+    // Développement : une image en grand (chemin) pour les captures.
+    if let Some(path) = std::env::var_os("MAGICPLUS_START_IMAGE") {
+        controller.view_image(std::path::Path::new(&path));
+    }
     // Développement : profil en grand (`moi`, ou nom d'un appareil) pour les captures.
     if let Ok(name) = std::env::var("MAGICPLUS_START_PROFILE") {
         let snapshot = engine.snapshot();

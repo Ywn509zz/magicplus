@@ -3,6 +3,14 @@
 Ce fichier est intégré à l'application : après une mise à jour, MagicPlus affiche les sections des
 versions installées depuis le dernier lancement. Une section par version, la plus récente en haut.
 
+## 0.15.0
+
+- **Images et GIF en grand** : cliquez sur une image ou un GIF d'une discussion (ou sur la photo et la bannière d'un profil en grand) pour l'afficher en grand ; les GIF restent animés. Échap ou « Fermer » pour revenir.
+- **Mentions @**, comme sur Discord : tapez « @ » dans un message, choisissez la personne (Entrée ou Tab prend la première) ou « @tous ». Les mentions sont mises en évidence, et un message qui vous mentionne est surligné en doré.
+- **Choisir à qui envoyer** : fichiers et presse-papiers peuvent partir vers les appareils de votre choix (cases à cocher) au lieu de tous.
+- **GIF réutilisables** : dans le menu d'un message avec une image ou un GIF, « Ajouter à mes GIF et autocollants », « Copier l'image » (à coller dans une autre app, même Discord) et « Envoyer à un appareil… ».
+- **GIF hors ligne** : sans Internet, le bouton GIF propose ceux que vous avez déjà envoyés (les autres ne sont disponibles qu'en ligne).
+
 ## 0.14.0
 
 - **Le bandeau d'information en bas de la fenêtre disparaît** après quelques secondes.

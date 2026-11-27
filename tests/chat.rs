@@ -767,9 +767,10 @@ fn donnees_de_demo() {
         [d, e].iter().all(|x| x.conversations().iter().any(|conv| conv.id == group && conv.members.len() == 5))
     });
     d.send_chat(&group, "Merci pour l'invitation 👋", None, &[]).unwrap();
+    c.send_chat(&group, "@Mac de démo tu ramènes la glacière ? @PC-Bureau s'occupe du parasol", None, &[]).unwrap();
     e.send_friend_request(&group, &id_of(a)).unwrap();
     wait_for("demande d'ami chez A", Duration::from_secs(20), || !a.snapshot().friend_requests.is_empty());
-    wait_for("message de D chez A", Duration::from_secs(20), || texts(&a.messages(&group, 50)).len() == 5);
+    wait_for("messages de C et D chez A", Duration::from_secs(20), || texts(&a.messages(&group, 50)).len() == 6);
     // Canevas partagé, écrit à plusieurs, avec un historique.
     let canvas = a.create_canvas(&group, "Préparatifs").unwrap();
     a.set_canvas_text(&group, &canvas, "# Préparatifs du week-end\n\n## À emporter\n- [x] tente\n- [ ] glacière\n").unwrap();

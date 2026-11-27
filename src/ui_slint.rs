@@ -2,6 +2,7 @@
 //! La page « Discussions » est dans `ui_slint/chat.rs`.
 
 mod canvas;
+mod files_clipboard;
 mod chat;
 mod emoji;
 mod images;
@@ -297,6 +298,43 @@ fn apply_theme(ui: &AppWindow, def: &crate::themes::ThemeDef) {
 }
 
 
+/// Ce qui attend le choix des appareils.
+enum Sending {
+    Files(Vec<std::path::PathBuf>),
+    Clipboard,
+}
+
+type SendingState = Rc<std::cell::RefCell<Option<Sending>>>;
+
+fn send_now(engine: &Engine, what: Sending, only: Option<Vec<String>>) {
+    let engine = engine.clone();
+    match what {
+        Sending::Files(paths) => engine.send_files_to(paths, only.as_deref()),
+        Sending::Clipboard => {
+            thread::spawn(move || engine.send_clipboard_to(false, only));
+        }
+    }
+}
+
+/// Demande à quels appareils envoyer (s'il y en a plusieurs joignables), sinon envoie tout de suite.
+fn ask_targets(ui: &AppWindow, engine: &Engine, pending: &SendingState, what: Sending) {
+    let devices = engine.reachable_devices();
+    if devices.len() <= 1 {
+        send_now(engine, what, None);
+        return;
+    }
+    let title = match &what {
+        Sending::Files(paths) if paths.len() == 1 => "Envoyer ce fichier à…".to_string(),
+        Sending::Files(paths) => format!("Envoyer ces {} fichiers à…", paths.len()),
+        Sending::Clipboard => "Envoyer le presse-papiers à…".to_string(),
+    };
+    let items: Vec<ChoiceItem> = devices.into_iter().map(|(id, name)| ChoiceItem { id: id.into(), name: name.into(), checked: true }).collect();
+    ui.set_send_targets(ModelRc::new(VecModel::from(items)));
+    ui.set_send_title(title.into());
+    *pending.borrow_mut() = Some(what);
+    ui.set_send_open(true);
+}
+
 /// Image en cours de recadrage.
 struct Cropping {
     source: magicplus_core::CropSource,
@@ -363,6 +401,7 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     refresh_my_profile(&ui, &engine, true);
     let profiles_seen = Rc::new(std::cell::Cell::new(engine.profiles_revision()));
     let cropping: CropState = Rc::default();
+    let sending: SendingState = Rc::default();
     {
         let engine = engine.clone();
         let (weak, state) = (ui.as_weak(), cropping.clone());
@@ -471,9 +510,11 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let engine = engine.clone();
+        let (weak, pending) = (ui.as_weak(), sending.clone());
         ui.on_send_clipboard(move || {
-            let engine = engine.clone();
-            thread::spawn(move || engine.send_clipboard(false));
+            if let Some(ui) = weak.upgrade() {
+                ask_targets(&ui, &engine, &pending, Sending::Clipboard);
+            }
         });
     }
     {
@@ -493,10 +534,44 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let engine = engine.clone();
+        let (weak, pending) = (ui.as_weak(), sending.clone());
         ui.on_send_files(move || {
-            if let Some(paths) = rfd::FileDialog::new().set_title("Choisir les fichiers à envoyer").pick_files() {
-                engine.send_files(paths);
+            if let (Some(paths), Some(ui)) = (rfd::FileDialog::new().set_title("Choisir les fichiers à envoyer").pick_files(), weak.upgrade()) {
+                ask_targets(&ui, &engine, &pending, Sending::Files(paths));
             }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let (weak, pending) = (ui.as_weak(), sending.clone());
+        ui.on_send_file(move |path| {
+            if let Some(ui) = weak.upgrade() {
+                ask_targets(&ui, &engine, &pending, Sending::Files(vec![std::path::PathBuf::from(path.as_str())]));
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_send_toggle(move |index, checked| {
+            let Some(ui) = weak.upgrade() else { return };
+            let targets = ui.get_send_targets();
+            if let Some(mut item) = targets.row_data(index.max(0) as usize) {
+                item.checked = checked;
+                targets.set_row_data(index.max(0) as usize, item);
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let (weak, pending) = (ui.as_weak(), sending.clone());
+        ui.on_send_confirm(move || {
+            let (Some(ui), Some(what)) = (weak.upgrade(), pending.borrow_mut().take()) else { return };
+            let chosen: Vec<String> = ui.get_send_targets().iter().filter(|t| t.checked).map(|t| t.id.to_string()).collect();
+            if chosen.is_empty() {
+                engine.set_status("Aucun appareil choisi : rien n'a été envoyé");
+                return;
+            }
+            send_now(&engine, what, Some(chosen));
         });
     }
     {
@@ -869,6 +944,20 @@ pub fn run(engine: Engine) -> Result<(), Box<dyn std::error::Error>> {
                 chat.select_index(1);
                 let data = ui.global::<ChatData>();
                 data.invoke_open_full_profile(data.get_peer_id());
+            })),
+            ("mention", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(0);
+                let data = ui.global::<ChatData>();
+                data.set_draft("Merci @".into());
+                data.invoke_typing_changed();
+            })),
+            ("image-en-grand", Box::new(|ui, chat| {
+                ui.set_page(chat::CHAT_PAGE);
+                chat.select_index(1);
+                if let Ok(path) = std::env::var("MAGICPLUS_START_IMAGE") {
+                    chat.view_image(std::path::Path::new(&path));
+                }
             })),
             ("nouveautes", Box::new(|ui, _| {
                 ui.global::<ChatData>().set_full_open(false);

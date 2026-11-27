@@ -14,6 +14,7 @@ pub mod firewall;
 pub mod friends;
 pub mod highlight;
 pub mod markdown;
+pub mod mentions;
 mod link;
 mod net;
 pub mod presence;

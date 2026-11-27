@@ -237,6 +237,8 @@ export component FullProfileView inherits Rectangle {
     in property <FullProfileItem> item;
     // 1 message, 2 ajouter en ami, 3 accepter, 4 modifier mon profil
     callback action(int);
+    // 0 photo, 1 bannière : à voir en grand.
+    callback view-picture(int);
     callback open-group(string);
     callback link-clicked(string);
     callback close();
@@ -257,10 +259,16 @@ export component FullProfileView inherits Rectangle {
                 background: root.item.profile.banner-color;
                 clip: true;
                 if root.item.profile.has-banner: Image {
-                    source: root.item.profile.banner;
+                    source: root.item.profile.banner-frames.length > 1 ? root.item.profile.banner-frames[Math.mod(Math.floor(Anim.tick * 50 / Math.max(root.item.profile.banner-frame-ms, 20)), root.item.profile.banner-frames.length)] : root.item.profile.banner;
                     width: parent.width;
                     height: parent.height;
                     image-fit: cover;
+                }
+                if root.item.profile.has-banner: TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.view-picture(1);
+                    }
                 }
             }
 
@@ -279,9 +287,17 @@ export component FullProfileView inherits Rectangle {
                     tint: root.item.profile.color;
                     photo: root.item.profile.photo;
                     has-photo: root.item.profile.has-photo;
+                    frames: root.item.profile.photo-frames;
+                    frame-ms: root.item.profile.photo-frame-ms;
                     show-presence: true;
                     online: root.item.online;
                     ring: Theme.popup;
+                }
+                if root.item.profile.has-photo: TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.view-picture(0);
+                    }
                 }
             }
 

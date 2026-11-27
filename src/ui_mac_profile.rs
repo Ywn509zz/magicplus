@@ -192,6 +192,24 @@ impl Controller {
         ring.addSubview(&photo);
         photo.centerXAnchor().constraintEqualToAnchor(&ring.centerXAnchor()).setActive(true);
         photo.centerYAnchor().constraintEqualToAnchor(&ring.centerYAnchor()).setActive(true);
+        // Clic sur la bannière ou la photo : en grand.
+        let mut clickable = |view: &NSView, path: Option<std::path::PathBuf>| {
+            let Some(path) = path else { return };
+            let tag = actions.len() as isize;
+            actions.push(Box::new(move |c: &Controller| c.view_image(&path)));
+            let overlay = button("", sel!(fullProfileAction:), self, mtm);
+            overlay.setTransparent(true);
+            overlay.setTag(tag);
+            overlay.setToolTip(Some(&ns("Voir en grand")));
+            top.addSubview(&overlay);
+            overlay.setTranslatesAutoresizingMaskIntoConstraints(false);
+            overlay.leadingAnchor().constraintEqualToAnchor(&view.leadingAnchor()).setActive(true);
+            overlay.trailingAnchor().constraintEqualToAnchor(&view.trailingAnchor()).setActive(true);
+            overlay.topAnchor().constraintEqualToAnchor(&view.topAnchor()).setActive(true);
+            overlay.bottomAnchor().constraintEqualToAnchor(&view.bottomAnchor()).setActive(true);
+        };
+        clickable(&banner, profile.banner.clone());
+        clickable(&ring, profile.avatar.clone());
         let presence = fill_view(0, if details.online { 0x23A55A } else { 0x80848E }, 14.0, mtm);
         presence.widthAnchor().constraintEqualToConstant(28.0).setActive(true);
         presence.heightAnchor().constraintEqualToConstant(28.0).setActive(true);

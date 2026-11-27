@@ -60,6 +60,14 @@ define_class!(
                     NSColor::separatorColor().setStroke();
                     path.stroke();
                 }
+                5 => {
+                    // Message qui nous mentionne : fond doré léger et trait à gauche.
+                    rgb_color(ivars.rgb.get()).colorWithAlphaComponent(0.13).setFill();
+                    NSBezierPath::fillRect(self.bounds());
+                    rgb_color(ivars.rgb.get()).setFill();
+                    let rect = self.bounds();
+                    NSBezierPath::fillRect(NSRect::new(rect.origin, NSSize::new(2.0, rect.size.height)));
+                }
                 mode => {
                     let color = match mode {
                         1 => NSColor::tertiaryLabelColor(),
@@ -322,6 +330,17 @@ pub(super) fn markdown_view(text: &str, size: f64, width: f64, mtm: MainThreadMa
     let view = stack(true, 5.0, mtm);
     for block in markdown::parse(text) {
         view.addArrangedSubview(&block_view(&block, size, width, mtm));
+    }
+    view
+}
+
+/// Comme `markdown_view`, avec les mentions « @nom » mises en évidence.
+pub(super) fn markdown_view_mentions(text: &str, size: f64, width: f64, names: &[String], mtm: MainThreadMarker) -> Retained<NSStackView> {
+    let view = stack(true, 5.0, mtm);
+    let mut blocks = markdown::parse(text);
+    magicplus_core::mentions::highlight(&mut blocks, names);
+    for block in &blocks {
+        view.addArrangedSubview(&block_view(block, size, width, mtm));
     }
     view
 }

@@ -105,6 +105,13 @@ pub fn blocks(text: &str) -> ModelRc<BlockItem> {
     ModelRc::new(VecModel::from(markdown::parse(text).iter().map(block_item).collect::<Vec<_>>()))
 }
 
+/// Comme `blocks`, avec les mentions « @nom » mises en évidence.
+pub fn blocks_with_mentions(text: &str, names: &[String]) -> ModelRc<BlockItem> {
+    let mut parsed = markdown::parse(text);
+    magicplus_core::mentions::highlight(&mut parsed, names);
+    ModelRc::new(VecModel::from(parsed.iter().map(block_item).collect::<Vec<_>>()))
+}
+
 /// Code des blocs ```…``` d'un texte (pour « Copier le code »).
 pub fn code_of(text: &str) -> Option<String> {
     let code: Vec<String> = markdown::parse(text).into_iter().filter_map(|block| block.code.map(|c| c.text)).collect();

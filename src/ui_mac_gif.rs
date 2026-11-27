@@ -57,7 +57,7 @@ impl Controller {
         };
         self.gif_popover();
         std::thread::spawn(move || {
-            let results = if favorites_tab { Ok(engine.gif_favorites()) } else { engine.giphy_search(&query, 0) };
+            let results = if favorites_tab { Ok(engine.gif_favorites()) } else { engine.gif_search_or_offline(&query, 0) };
             let found = results
                 .map(|results| results.into_iter().filter_map(|gif| engine.giphy_preview(&gif).ok().map(|path| (gif, path))).collect())
                 .map_err(|error| error.to_string());

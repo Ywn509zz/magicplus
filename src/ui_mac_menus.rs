@@ -165,6 +165,7 @@ impl Controller {
             if super::markdown_view::code_of(&message.text).is_some() {
                 entries.push(Entry::Item("chevron.left.forwardslash.chevron.right", "Copier le code".into(), false, Box::new(move |c| c.chat_copy_code(index))));
             }
+            self.media_entries(index, &mut entries);
             if message.mine && !closed {
                 entries.push(Entry::Separator);
                 if !message.text.is_empty() {
